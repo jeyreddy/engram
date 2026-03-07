@@ -1,0 +1,58 @@
+{
+  "name": "Instrumentation",
+  "version": "1.0",
+  "asset_identifier": "tag_number",
+  "asset_id_pattern": "^[A-Z]{1,4}-[0-9]{3,5}[A-Z]?$",
+  "document_types": [
+    "P&ID", "Datasheet", "Hook-Up Drawing", "Loop Diagram",
+    "Alarm Datasheet", "Valve Spec", "Inst. Index",
+    "DCS Config Report", "Alarm Summary", "Controller Tuning",
+    "I/O List Export", "Cause & Effect", "Interlock Desc.",
+    "Vendor IOM", "Troubleshoot Guide", "FAT/SAT Report",
+    "Material Cert", "ATEX/SIL Cert",
+    "Work Procedure", "Maintenance Proc.", "Comm. Procedure",
+    "Engineering Std.", "Calibration Record", "Work Order",
+    "Inspection Report", "Corrective Action",
+    "Purchase Order", "Spare Parts List"
+  ],
+  "completeness_standard": {
+    "FT": ["P&ID","Datasheet","Hook-Up Drawing","Loop Diagram","Alarm Datasheet","DCS Config Report","Vendor IOM","Work Procedure","Calibration Record","Purchase Order"],
+    "TT": ["P&ID","Datasheet","Hook-Up Drawing","Alarm Datasheet","DCS Config Report","Vendor IOM","Work Procedure","Calibration Record"],
+    "CV": ["P&ID","Valve Spec","Datasheet","Hook-Up Drawing","Loop Diagram","DCS Config Report","Vendor IOM","Maintenance Proc.","Purchase Order"],
+    "PT": ["P&ID","Datasheet","Hook-Up Drawing","DCS Config Report","Vendor IOM","Calibration Record"],
+    "LT": ["P&ID","Datasheet","Hook-Up Drawing","Alarm Datasheet","DCS Config Report","Vendor IOM","Work Procedure","Calibration Record"],
+    "AT": ["P&ID","Datasheet","Hook-Up Drawing","Alarm Datasheet","DCS Config Report","Vendor IOM","Work Procedure","Calibration Record","FAT/SAT Report"]
+  },
+  "key_fields": [
+    "range","alarm_high","alarm_low","alarm_hh","alarm_ll",
+    "output_signal","fail_position","process_connection",
+    "dcs_card","dcs_channel","jb_ref","cable_ref",
+    "revision","calibration_date","calibration_interval"
+  ],
+  "inconsistency_rules": [
+    {
+      "id": "ALARM_SP_CONFLICT",
+      "description": "Alarm setpoint in Alarm Datasheet differs from DCS Config Report",
+      "doc_type_a": "Alarm Datasheet",
+      "doc_type_b": "DCS Config Report",
+      "fields": ["alarm_high","alarm_low","alarm_hh","alarm_ll"],
+      "severity": "ERROR"
+    },
+    {
+      "id": "RANGE_CONFLICT",
+      "description": "Instrument range in Datasheet differs from DCS EU range",
+      "doc_type_a": "Datasheet",
+      "doc_type_b": "DCS Config Report",
+      "fields": ["range"],
+      "severity": "WARNING"
+    },
+    {
+      "id": "FAIL_POSITION_CONFLICT",
+      "description": "Fail position differs between P&ID and Valve Spec",
+      "doc_type_a": "P&ID",
+      "doc_type_b": "Valve Spec",
+      "fields": ["fail_position"],
+      "severity": "ERROR"
+    }
+  ]
+}

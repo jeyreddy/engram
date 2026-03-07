@@ -1,0 +1,50 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(npm show:*)",
+      "Bash(npm pack:*)",
+      "Bash(tar:*)",
+      "Bash(mkdir:*)",
+      "Bash(node:*)",
+      "Bash(python:*)",
+      "Bash(npm list electron)",
+      "Bash(npm list)",
+      "Bash(npm audit)",
+      "Bash(ollama pull nomic-embed-text)",
+      "Bash(ollama list)",
+      "Bash(./node_modules/.bin/electron --version)",
+      "Bash(timeout 25 ./node_modules/.bin/electron .)",
+      "Bash(grep -v \"^C:\\\\\\\\engram\\\\\\\\node_modules\\\\\\\\pdf-parse\")",
+      "Bash(timeout 5 ./node_modules/.bin/electron -e \"import\\(''electron/main''\\).then\\(m => { console.log\\(Object.keys\\(m\\).filter\\(k => [''app'',''dialog'',''ipcMain'',''BrowserWindow''].includes\\(k\\)\\)\\); process.exit\\(0\\); }\\).catch\\(e => { console.error\\(e.message\\); process.exit\\(1\\); }\\)\")",
+      "Bash(timeout 5 ./node_modules/.bin/electron -e \"const m = require\\(''electron''\\); console.log\\(Object.keys\\(m\\).filter\\(k => [''app'',''dialog'',''ipcMain'',''BrowserWindow''].includes\\(k\\)\\)\\); process.exit\\(0\\);\")",
+      "Bash(timeout 5 ./node_modules/.bin/electron -e \"const m = require\\(''electron''\\); console.log\\(Object.keys\\(m\\).slice\\(0,20\\)\\); process.exit\\(0\\);\")",
+      "Read(//c/Users/Jagan Reddy/AppData/Local/Temp/claude/c--engram/tasks/**)",
+      "Bash(taskkill /F /IM electron.exe /T)",
+      "Bash(taskkill /F /IM node.exe /T)",
+      "Bash(netstat -ano)",
+      "Bash(taskkill /F /PID 34660 /PID 44568 /PID 43844 /PID 41316 /PID 36032)",
+      "Bash(powershell -Command \"Stop-Process -Id 34660,44568,43844,41316,36032 -Force -ErrorAction SilentlyContinue; Write-Host ''done''\" sleep 2)",
+      "Read(//tmp/**)",
+      "Bash(powershell -Command \"Get-Process electron -ErrorAction SilentlyContinue | Select-Object Id, CPU, WorkingSet\")",
+      "Bash(powershell -Command \"Get-Process | Where-Object {$_Name -like ''*electron*''} | Select-Object Id, Name, CPU\")",
+      "Bash(unset ELECTRON_RUN_AS_NODE)",
+      "Bash(timeout 8 NODE_ENV=development node_modules/.bin/electron .)",
+      "Bash(echo \"exit code: $?\")",
+      "Bash(export NODE_ENV=development)",
+      "Bash(timeout 10 node_modules/.bin/electron .)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(powershell -Command \"Get-Process | Where-Object {$_Name -like ''*electron*''} | Stop-Process -Force -ErrorAction SilentlyContinue; Write-Host ''killed''\")",
+      "Bash(powershell -Command \"Get-NetTCPConnection -LocalPort 5173,5174,5175,5176,5177 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_OwningProcess -Force -ErrorAction SilentlyContinue }; Write-Host done\")",
+      "Bash(powershell -Command \":*)",
+      "Read(//c/engram node node_modules/vite/bin/vite.js /tmp/vite5.log 2 1 sleep 5 grep Local: /tmp/**)",
+      "Read(//c/Users/Jagan Reddy/AppData/Roaming/engram/engram-workspace//**)",
+      "Bash(git add -A)",
+      "Bash(git commit -m \"ENGRAM Phase 1 — core pipeline working. Excel RAG, CRN expiry analysis, manufacturer lookup all confirmed.\")",
+      "Bash(git init)"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\Jagan Reddy\\AppData\\Roaming\\engram\\engram-workspace\\vectorindex"
+    ]
+  }
+}
