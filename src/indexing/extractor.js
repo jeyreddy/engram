@@ -180,6 +180,33 @@ export async function extractText(filePath) {
 const TAG_RE = /\b[A-Z]{1,4}-[0-9]{3,5}\b/g;
 
 /**
+ * Returns true if `value` looks like a real instrument tag number.
+ *
+ * Rejects common false positives that appear in engineering documents:
+ *   - Wattage/power values  (e.g. "15W", "3.5W/ft", "10W/m")
+ *   - Bare 1–2 digit numbers
+ *   - ISO date strings      (e.g. "2024-03")
+ *   - Empty / too-short strings
+ *
+ * Used wherever extracted_values rows are auto-registered as tags, to keep
+ * the tag registry clean.
+ *
+ * @param {string|number|null|undefined} value
+ * @returns {boolean}
+ */
+export function isValidTag(value) {
+  if (!value) return false;
+  const v = value.toString().trim();
+  if (v.endsWith('W') && /^\d/.test(v)) return false;  // wattage: "15W"
+  if (v.includes('W/ft')) return false;                 // heat trace: "3W/ft"
+  if (v.includes('W/m'))  return false;                 // heat trace: "10W/m"
+  if (/^\d{1,2}$/.test(v)) return false;                // bare 1–2 digit number
+  if (/^\d{4}-\d{2}/.test(v)) return false;             // ISO date: "2024-03-…"
+  if (v.length < 2) return false;
+  return true;
+}
+
+/**
  * Find all instrument/tag references in text.
  * Pattern: one–four uppercase letters, hyphen, three–five digits (e.g. FT-1001).
  *
@@ -271,6 +298,38 @@ export function extractKeyValues(text, docType) { // eslint-disable-line no-unus
  * @param {number} [overlap=50]
  * @returns {string[]}
  */
+/**
+ * Parse pipe-delimited "Field: Value | Field: Value" lines produced by
+ * extractExcelText into individual field/value pairs.
+ *
+ * @param {string} text
+ * @returns {{ fieldName: string, fieldValue: string }[]}
+ */
+export function extractStructuredRows(text) {
+  const pairs = [];
+  const lines = text.split('\n');
+  for (const line of lines) {
+    const parts = line.split(' | ');
+    for (const part of parts) {
+      const colonIdx = part.indexOf(':');
+      if (colonIdx === -1) continue;
+      const fieldName  = part.slice(0, colonIdx).trim();
+      const fieldValue = part.slice(colonIdx + 1).trim();
+      if (
+        fieldName &&
+        fieldValue &&
+        fieldValue !== '-' &&
+        fieldValue !== '' &&
+        fieldName !== '===' &&
+        !fieldName.startsWith('===')
+      ) {
+        pairs.push({ fieldName, fieldValue });
+      }
+    }
+  }
+  return pairs;
+}
+
 export function chunkText(text, chunkSize = 512, overlap = 50) {
   if (!text || text.length === 0) return [];
 

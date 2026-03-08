@@ -1,3 +1,33 @@
+//
+// src/indexing/pipeline.js — Document indexing pipeline
+//
+// WHAT indexFile() DOES (in order):
+//   1. SHA-256 checksum         — used by indexFolder() to skip unchanged files
+//   2. extractText()            — PDF → pdf-parse, DOCX → mammoth, XLSX → xlsx
+//   3. extractKeyValues()       — regex patterns for known doc types (revision,
+//                                 tag number, engineering range, units…)
+//   4. Revision derivation      — prefer extracted value; fall back to caller arg
+//   5. Upsert document row      — INSERT ON CONFLICT(file_path) DO UPDATE;
+//                                 returns the document's integer id
+//   6a. Store key-value pairs   — DELETE then re-INSERT into extracted_values
+//   6b. extractStructuredRows() — parse "Field: Value | Field: Value" pipe-lines
+//                                 from Excel exports; stored with confidence=1.0
+//   6c. Auto-register tags      — extracted_values rows whose field_name contains
+//                                 'tag' / 'Tag' / 'Equipment Number' are
+//                                 INSERT OR IGNORE'd into the tags table
+//   7. OCR queue                — files that yielded no text (scanned PDFs) are
+//                                 appended to workspace_config['ocr_queue']
+//   8. Vector upsert            — remove old chunks (deleteDocument), then embed
+//                                 and store each new chunk via addDocument()
+//
+// WHY TWO EXTRACTION PATHS (6a + 6b):
+//   extractKeyValues uses hand-crafted regexes tuned for specific doc types and
+//   may miss generic Excel tables.  extractStructuredRows handles the pipe-
+//   delimited format produced when xlsx serialises multi-column sheets to text.
+//   Both write to extracted_values and therefore feed the keyword SQL search and
+//   the direct tag-list query path in query:send.
+//
+
 import { createHash } from 'crypto';
 import { createReadStream } from 'fs';
 import { readdir } from 'fs/promises';
@@ -5,7 +35,7 @@ import { extname, basename, join } from 'path';
 
 import { getConfig, setConfig } from '../db/workspace.js';
 import { addDocument, deleteDocument } from '../ai/vectorstore.js';
-import { extractText, extractKeyValues, chunkText } from './extractor.js';
+import { extractText, extractKeyValues, chunkText, extractStructuredRows, isValidTag } from './extractor.js';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -138,6 +168,46 @@ export async function indexFile(db, store, filePath, tagId, docType, metadata = 
     });
     insertAll(keyValues);
   }
+
+  // 6b. Parse structured rows (pipe-delimited Excel format) into additional field/value pairs
+  const structuredPairs = extractStructuredRows(text);
+  if (structuredPairs.length > 0) {
+    const insertStructured = db.prepare(`
+      INSERT INTO extracted_values(document_id, field_name, field_value, confidence, created_at)
+      VALUES (?, ?, ?, 1.0, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    `);
+    for (const pair of structuredPairs) {
+      try { insertStructured.run(docId, pair.fieldName, pair.fieldValue); } catch (_) {}
+    }
+    console.log(`[pipeline] stored ${structuredPairs.length} structured field/value pairs for doc ${docId}`);
+  }
+
+  // 6c. Auto-register tags found in extracted_values
+  try {
+    const tagRows = db.prepare(`
+      SELECT DISTINCT field_value
+      FROM extracted_values
+      WHERE document_id = ?
+        AND (field_name = 'Tag' OR field_name = 'tag' OR field_name = 'TAG'
+          OR field_name = 'Equipment Number' OR field_name LIKE '%tag%')
+        AND field_value IS NOT NULL
+        AND field_value != '-'
+        AND field_value != ''
+        AND length(field_value) > 1
+    `).all(docId);
+
+    for (const row of tagRows) {
+      const tagVal = row.field_value.toString().trim();
+      if (!isValidTag(tagVal)) continue;
+      try {
+        db.prepare(`
+          INSERT OR IGNORE INTO tags(name, tag_id, description, instrument_type, area, status, created_at)
+          VALUES (?, ?, ?, ?, 'Default', 'active', strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        `).run(tagVal, tagVal, `From ${title}`, tagVal.split('-')[0] || 'UNKNOWN');
+      } catch (_) {}
+    }
+    if (tagRows.length > 0) console.log(`[pipeline] registered ${tagRows.length} tags from extracted_values for doc ${docId}`);
+  } catch (e) { console.warn('[pipeline] tag registration failed:', e.message); }
 
   // 7. OCR queue
   if (ocrRequired) {

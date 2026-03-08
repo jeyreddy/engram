@@ -1,3 +1,25 @@
+//
+// src/ai/vectorstore.js — Vectra LocalIndex wrapper
+//
+// TWO SEPARATE INDEXES:
+//   store    (main)      — regular engineering documents; path = indexPath
+//   stdStore (standards) — uploaded policy/standard files; path = indexPath + '_standards'
+//
+// Keeping standards in a separate index means:
+//   • Standards are never returned when searching regular documents (no noise)
+//   • query:send searches both independently and merges results with standards
+//     placed FIRST so Claude treats them as highest-priority context
+//   • Standards can be rebuilt without touching the main document index
+//
+// ITEM IDs:
+//   Regular docs:  "${docId}-${chunkIndex}"   e.g. "42-0", "42-1"
+//   Standards:     "${stdId}-${chunkIndex}"   same pattern, different store
+//
+// PERSISTENCE:
+//   Vectra writes index.json after every endUpdate() (auto-called by upsertItem
+//   and deleteItem).  persistStore() is a no-op kept for API symmetry.
+//
+
 import { generateEmbedding } from './embeddings.js';
 
 /**
@@ -122,6 +144,45 @@ export async function deleteDocument(store, id) {
  *
  * @param {LocalIndex} store
  */
+/**
+ * Create or load a separate vectra index for standards/policy documents.
+ * Stored at `${indexPath}_standards` so it never mixes with regular docs.
+ */
+export async function initStandardsStore(indexPath) {
+  const fs = await import('fs');
+  const { LocalIndex } = await import('vectra');
+  const stdPath = indexPath + '_standards';
+  if (!fs.existsSync(stdPath)) fs.mkdirSync(stdPath, { recursive: true });
+  const store = new LocalIndex(stdPath);
+  if (!(await store.isIndexCreated())) await store.createIndex();
+  return store;
+}
+
+/**
+ * Embed and upsert a standards chunk. ID is `stdId-chunkIndex`.
+ */
+export async function addStandard(store, id, text, metadata = {}) {
+  const vector = await generateEmbedding(text);
+  await store.upsertItem({
+    id: String(id),
+    vector,
+    metadata: { ...metadata, text, source: 'standard' },
+  });
+}
+
+/**
+ * Semantic search against the standards index.
+ */
+export async function searchStandards(store, query, k = 5) {
+  const vector  = await generateEmbedding(query);
+  const results = await store.queryItems(vector, query, k);
+  return results.map(({ item, score }) => ({
+    id:       item.id,
+    score,
+    metadata: item.metadata,
+  }));
+}
+
 export async function persistStore(store) { // eslint-disable-line no-unused-vars
   // vectra's LocalIndex writes index.json on every endUpdate() call,
   // which is invoked automatically by upsertItem() and deleteItem().

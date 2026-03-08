@@ -1,0 +1,14 @@
+{
+  "engineer_name": "Jagan Reddy",
+  "engineer_email": "jagan@aircompany.com",
+  "plant_name": "Air Company Plant",
+  "area": "Unit 100",
+  "source_paths": [],
+  "projects": [
+    "Default"
+  ],
+  "current_project": "Default",
+  "discipline": "instrumentation",
+  "notes": "Edit this file in Notepad to configure ENGRAM. Save and restart the app for changes to take effect. Do NOT add your Downloads or Desktop folder to source_paths.",
+  "source_paths_guide": "Add full folder paths here. Example: C:\\\\Projects\\\\Plant1\\\\Documents. ENGRAM will index ALL files in these folders on Re-index."
+}

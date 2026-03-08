@@ -1,33 +1,128 @@
+//
+// src/main/preload.cjs — Electron contextBridge preload
+//
+// SECURITY MODEL:
+//   Electron runs this script in an isolated context before the renderer page
+//   loads.  contextBridge.exposeInMainWorld creates a safe, sandboxed bridge:
+//   the renderer can only call the functions listed here — it cannot access
+//   Node.js APIs or the full ipcRenderer object directly.
+//
+// NAMING CONVENTION:
+//   Every entry is a thin wrapper around ipcRenderer.invoke(channel, ...args).
+//   The channel names match the ipcMain.handle() registrations in ipc.cjs.
+//   Objects (like `meta`) are spread into a single argument because IPC
+//   serialises arguments with the structured clone algorithm.
+//
+
 const { contextBridge, ipcRenderer } = require("electron")
 
 contextBridge.exposeInMainWorld("engram", {
+
+  // ── Workspace configuration ──────────────────────────────────────────────
+  // Config is stored as key-value rows in workspace_config table.
+  // `setupWorkspace` is called once by the setup wizard on first launch.
   getWorkspaceConfig:  ()         => ipcRenderer.invoke("workspace:get"),
   saveWorkspaceConfig: (config)   => ipcRenderer.invoke("workspace:save", config),
   setupWorkspace:      (config)   => ipcRenderer.invoke("workspace:setup", config),
+  getConfig:           (key)      => ipcRenderer.invoke("workspace:getkey", key),
+  // workspace.config.json at C:\engram\ mirrors the DB for human editing
+  openConfigFile:      ()         => ipcRenderer.invoke("workspace:openConfigFile"),
+  saveConfigFile:      ()         => ipcRenderer.invoke("workspace:saveConfigFile"),
+
+  // ── Document indexing ─────────────────────────────────────────────────────
+  // `triggerReindex` indexes a single folder path.
+  // `reindex` re-indexes all source_paths stored in workspace_config.
+  // Progress events are pushed via IPC (not invoke) and received via onIndexProgress.
   triggerReindex:      (path)     => ipcRenderer.invoke("index:trigger", path),
   getIndexStatus:      ()         => ipcRenderer.invoke("index:status"),
+  addDocuments:        ()         => ipcRenderer.invoke("docs:addFromDialog"),
+  reindex:             ()         => ipcRenderer.invoke("index:reindexAll"),
+  cleanupIndex:        ()         => ipcRenderer.invoke("index:cleanup"),
+  onIndexProgress:     (cb)       => ipcRenderer.on("index:progress", (_e, data) => cb(data)),
+
+  // ── AI query ──────────────────────────────────────────────────────────────
+  // Runs the full query pipeline: vector search + keyword search + standards
+  // search + registry context injection, then calls Claude claude-sonnet-4-6.
   query:               (text)     => ipcRenderer.invoke("query:send", text),
-  getTags:             (area)     => ipcRenderer.invoke("tags:get", area),
-  getTag:              (tagId)    => ipcRenderer.invoke("tags:getOne", tagId),
-  createTag:           (data)     => ipcRenderer.invoke("tags:create", data),
+
+  // ── Tag registry ──────────────────────────────────────────────────────────
+  // Tags are instrument loop numbers (e.g. FT-101).  The registry stores make,
+  // model, area, instrument_type, status, notes alongside the tag ID.
+  // tag_id is the human-readable identifier; the integer `id` is the DB PK.
+  listTags:            ()              => ipcRenderer.invoke("tags:list"),
+  getTags:             ()              => ipcRenderer.invoke("tags:list"),  // alias for listTags
+  getTag:              (tagId)         => ipcRenderer.invoke("tags:get", tagId),
+  createTag:           (data)          => ipcRenderer.invoke("tags:create", data),
+  updateTag:           (data)          => ipcRenderer.invoke("tags:update", data),
+  deleteTag:           (tagId)         => ipcRenderer.invoke("tags:delete", tagId),
+  copyTag:             (tagId, newId)  => ipcRenderer.invoke("tags:copy", tagId, newId),
+  searchTags:          (query)         => ipcRenderer.invoke("tags:search", query),
+
+  // ── Documents ─────────────────────────────────────────────────────────────
+  // `addDoc` indexes a file and links it to a tag; emits index:progress events.
+  // `createDocument` / `editDocument` go through the document authoring engine
+  //   which writes to disk and commits to git.
   getDocs:             (tagId)    => ipcRenderer.invoke("docs:get", tagId),
   addDoc:              (data)     => ipcRenderer.invoke("docs:add", data),
   createDocument:      (data)     => ipcRenderer.invoke("docs:create", data),
   editDocument:        (data)     => ipcRenderer.invoke("docs:edit", data),
+  listDocs:            ()         => ipcRenderer.invoke("docs:list"),
+  deleteDoc:           (docId)    => ipcRenderer.invoke("docs:delete", docId),
+  renameDoc:           (docId, displayName, description) => ipcRenderer.invoke("docs:rename", docId, displayName, description),
+  getDocFields:        (docId)    => ipcRenderer.invoke("docs:getFields", docId),
+
+  // ── Issues ────────────────────────────────────────────────────────────────
+  // Issues are generated by the rules engine (rules/engine.js) and stored in
+  // the issues table.  Engineers classify them as ERROR/WARNING/QUERY/ACCEPTED.
   getIssues:           (tagId)    => ipcRenderer.invoke("issues:get", tagId),
   updateIssue:         (issue)    => ipcRenderer.invoke("issues:update", issue),
   runIssues:           (tagId)    => ipcRenderer.invoke("issues:run", tagId),
+  classifyIssue:       (issueId, classification, comment) => ipcRenderer.invoke("issues:update", { id: issueId, classification, comment }),
+
+  // ── Change staging ────────────────────────────────────────────────────────
+  // Staged changes are queued in workspace_config['staged_changes'] (JSON array)
+  // before being committed to git via the author engine.
+  stageChange:         (tagId, field, oldVal, newVal) => ipcRenderer.invoke("stage:change", { tagId, field, oldVal, newVal }),
+
+  // ── Git history ───────────────────────────────────────────────────────────
   getHistory:          (tagId)    => ipcRenderer.invoke("git:history", tagId),
   revertCommit:        (hash)     => ipcRenderer.invoke("git:revert", hash),
+
+  // ── Wiring ────────────────────────────────────────────────────────────────
   getWiring:           (tagId)    => ipcRenderer.invoke("wiring:get", tagId),
   saveWiring:          (data)     => ipcRenderer.invoke("wiring:save", data),
   getJBMap:            (jbRef)    => ipcRenderer.invoke("wiring:jb", jbRef),
   traceFromDCS:        (c, ch)    => ipcRenderer.invoke("wiring:trace", { card: c, channel: ch }),
+
+  // ── Projects ──────────────────────────────────────────────────────────────
+  // Projects group documents within the workspace (stored as project_name on
+  // the documents table).  The current project is persisted in workspace_config.
+  listProjects:        ()         => ipcRenderer.invoke("projects:list"),
+  createProject:       (name)     => ipcRenderer.invoke("projects:create", name),
+  setCurrentProject:   (name)     => ipcRenderer.invoke("projects:setCurrent", name),
+  getCurrentProject:   ()         => ipcRenderer.invoke("projects:getCurrent"),
+
+  // ── File dialogs ──────────────────────────────────────────────────────────
+  // openFolder → returns a single folder path string (or null if cancelled).
+  // openFiles  → returns an array of file path strings.
   openFolder:          ()         => ipcRenderer.invoke("dialog:openFolder"),
   openFiles:           ()         => ipcRenderer.invoke("dialog:openFiles"),
-  getConfig:           (key)      => ipcRenderer.invoke("workspace:getkey", key),
-  stageChange:         (tagId, field, oldVal, newVal) => ipcRenderer.invoke("stage:change", { tagId, field, oldVal, newVal }),
-  classifyIssue:       (issueId, classification, comment) => ipcRenderer.invoke("issues:update", { id: issueId, classification, comment }),
-  addDocuments:        () => ipcRenderer.invoke("docs:addFromDialog"),
-  reindex:             () => ipcRenderer.invoke("index:reindexAll"),
+
+  // ── Standards registry (notepad of standard numbers for AI context) ───────
+  // The registry is a user-maintained list of applicable standard numbers
+  // (e.g. ISA-5.1, IEC 61511).  It is injected into the Claude system prompt
+  // at query time so Claude can flag non-conformances using its built-in
+  // knowledge of each standard — no document upload required.
+  listRegistry:        ()         => ipcRenderer.invoke("registry:list"),
+  saveRegistry:        (items)    => ipcRenderer.invoke("registry:save", items),
+
+  // ── Uploaded standards & policy documents ─────────────────────────────────
+  // These are actual PDF/DOCX files (e.g. an IEC standard PDF, a company SOP).
+  // They are indexed into a separate vectra store (vectorindex_standards/) and
+  // searched semantically at query time.  Different from the registry above.
+  listStandards:       ()                  => ipcRenderer.invoke("standards:list"),
+  addStandard:         (filePath, meta)    => ipcRenderer.invoke("standards:add", { filePath, ...meta }),
+  deleteStandard:      (id)               => ipcRenderer.invoke("standards:delete", id),
+  listStdCategories:   ()                  => ipcRenderer.invoke("standards:categories"),
+  addStandardsFolder:  (folderPath, meta) => ipcRenderer.invoke("standards:addFolder", { folderPath, ...meta }),
 })

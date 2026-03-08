@@ -1,13 +1,38 @@
+//
+// src/ai/claude.js — Claude API integration
+//
+// SYSTEM PROMPT ARCHITECTURE:
+//   The prompt is assembled from three parts in queryWithContext():
+//     1. SYSTEM_CORE     — static persona and grounding rules (never invent values)
+//     2. Context line    — plant/discipline/user identity from workspace_config
+//     3. systemExtra     — optional addendum passed by the caller; used by the
+//                          query:send handler to inject the standards_registry
+//                          list ("APPLICABLE STANDARDS & CODES: …")
+//
+// CONTEXT INJECTION:
+//   Document context is prepended to the USER message (not the system prompt)
+//   as a structured block:  [filename | doc_type | Rev X]\n<content>
+//   This keeps the system prompt stable (better cache reuse) and lets Claude
+//   cite sources naturally in its response.
+//
+// MODEL:
+//   claude-sonnet-4-6 balances speed and quality for document analysis tasks.
+//   max_tokens is set to 2048 — sufficient for detailed field-by-field answers.
+//
+
 import Anthropic from '@anthropic-ai/sdk';
 import { getConfig } from '../db/workspace.js';
 
 export const CLAUDE_MODEL = 'claude-sonnet-4-6';
 
+// Core system instructions.  Keep this stable — changing it invalidates any
+// prompt caching benefit on the Anthropic API side.
 const SYSTEM_CORE = `You are ENGRAM, a plant document integrity assistant.
 Answer only from the provided document context.
 Always cite the source document and field.
 If information is not in the context say so explicitly.
-Never invent values.`;
+Never invent values.
+When context includes STANDARD/POLICY documents, apply those requirements to your analysis and flag any non-conformances.`;
 
 /**
  * Returns true if a Claude API key is configured and the SDK can be instantiated.

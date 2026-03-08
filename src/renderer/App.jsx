@@ -64,6 +64,59 @@ function parseSources(text = '') {
   return { body: text.replace(/\[SOURCE:[^\]]*\]/gi, '').trim(), srcs }
 }
 
+function relativeTime(isoStr) {
+  if (!isoStr) return 'unknown'
+  try {
+    const diff = Date.now() - new Date(isoStr).getTime()
+    const mins = Math.floor(diff / 60000)
+    if (mins < 1) return 'just now'
+    if (mins < 60) return `${mins}m ago`
+    const hrs = Math.floor(mins / 60)
+    if (hrs < 24) return `${hrs}h ago`
+    return `${Math.floor(hrs / 24)}d ago`
+  } catch { return 'unknown' }
+}
+
+function fileTypeBadgeColor(ext = '') {
+  const e = ext.toLowerCase()
+  if (e === 'xlsx' || e === 'xls') return '#22c55e'
+  if (e === 'pdf') return '#ef4444'
+  if (e === 'docx' || e === 'doc') return '#3b82f6'
+  return TEXTM
+}
+
+function highlightText(text = '', query = '') {
+  if (!query.trim() || !text) return text
+  const q   = query.trim().toLowerCase()
+  const idx = text.toLowerCase().indexOf(q)
+  if (idx === -1) return text
+  return (
+    <>
+      {text.slice(0, idx)}
+      <mark style={{ background: '#38bdf840', color: '#38bdf8', borderRadius: 2, padding: '0 1px' }}>
+        {text.slice(idx, idx + q.length)}
+      </mark>
+      {text.slice(idx + q.length)}
+    </>
+  )
+}
+
+function getFileGroup(filename = '') {
+  if (!filename) return 'Other'
+  const ext = filename.split('.').pop().toLowerCase().trim()
+  if (['xlsx', 'xls', 'xlsm', 'xlsb', 'csv'].includes(ext)) return 'Excel Files'
+  if (['pdf'].includes(ext))                                  return 'PDF Files'
+  if (['doc', 'docx', 'rtf'].includes(ext))                  return 'Word Documents'
+  return 'Other'
+}
+
+function getGroupColor(groupName = '') {
+  if (groupName.includes('Excel')) return '#22c55e'
+  if (groupName.includes('PDF'))   return '#ef4444'
+  if (groupName.includes('Word'))  return '#3b82f6'
+  return '#64748b'
+}
+
 // Group tags by instrument-type prefix (e.g. FT, PT, LT)
 function groupTags(tags = []) {
   const groups = {}
@@ -149,6 +202,18 @@ function CoverageBar({ pct = 0 }) {
 // ── TopBar ────────────────────────────────────────────────────────────────────
 
 function TopBar({ engineerName, totalDocs, totalIssues, totalErrors }) {
+  const [savedMsg, setSavedMsg] = useState(false)
+
+  const handleEditConfig = () => {
+    window.engram?.openConfigFile?.().catch(console.error)
+  }
+
+  const handleSaveConfig = async () => {
+    await window.engram?.saveConfigFile?.().catch(console.error)
+    setSavedMsg(true)
+    setTimeout(() => setSavedMsg(false), 2000)
+  }
+
   return (
     <div style={{
       height: 48, flexShrink: 0,
@@ -177,6 +242,26 @@ function TopBar({ engineerName, totalDocs, totalIssues, totalErrors }) {
 
       <div style={{ flex: 1 }} />
 
+      {/* Config buttons */}
+      <button
+        onClick={handleEditConfig}
+        title="Open workspace.config.json in Notepad"
+        style={{
+          background: '#0d2035', color: '#64748b', border: '1px solid #081828',
+          fontFamily: MONO, fontSize: 10, padding: '4px 8px',
+          borderRadius: 3, cursor: 'pointer',
+        }}
+      >📝 Edit Config</button>
+      <button
+        onClick={handleSaveConfig}
+        title="Save current settings to workspace.config.json"
+        style={{
+          background: '#0d2035', color: savedMsg ? '#34d399' : '#64748b', border: '1px solid #081828',
+          fontFamily: MONO, fontSize: 10, padding: '4px 8px',
+          borderRadius: 3, cursor: 'pointer', transition: 'color .2s',
+        }}
+      >{savedMsg ? '✓ Saved' : '💾 Save Config'}</button>
+
       {/* Engineer name */}
       {engineerName && (
         <span style={{ fontFamily: MONO, fontSize: 10, color: TEXTM }}>
@@ -201,154 +286,475 @@ function StatPill({ label, value, color, pulse }) {
   )
 }
 
-// ── Left Panel ────────────────────────────────────────────────────────────────
+// ── Left Panel — Tag Registry ─────────────────────────────────────────────────
 
-function LeftPanel({ tags, activeTag, onSelectTag, onAddDocs, onReindex }) {
-  const [collapsed, setCollapsed] = useState({})
-  const groups = groupTags(tags)
+function LeftPanel({ tags, activeTag, onSelectTag, onCreateTag, onUpdateTag, onDeleteTag, onCopyTag, onAddDocs, onReindex }) {
+  const [searchText,    setSearchText]    = useState('')
+  const [selectedTag,   setSelectedTag]   = useState(null)
+  const [showAddForm,   setShowAddForm]   = useState(false)
+  const [reindexing,    setReindexing]    = useState(false)
+  const [cleanupMsg,    setCleanupMsg]    = useState(null)   // null | string
+  const [hoverAdd,      setHoverAdd]      = useState(false)
+  const [hoverReindex,  setHoverReindex]  = useState(false)
+  const [hoverCleanup,  setHoverCleanup]  = useState(false)
 
-  const toggleGroup = key => setCollapsed(p => ({ ...p, [key]: !p[key] }))
+  const handleReindexClick = () => {
+    setReindexing(true)
+    onReindex()
+    setTimeout(() => setReindexing(false), 2000)
+  }
+
+  const handleCleanup = async () => {
+    setCleanupMsg('Scanning…')
+    try {
+      const res = await window.engram?.cleanupIndex?.()
+      if (res?.ok) {
+        setCleanupMsg(res.cleaned > 0 ? `Cleaned ${res.cleaned} orphan${res.cleaned !== 1 ? 's' : ''}` : 'No orphans found')
+      } else {
+        setCleanupMsg('Cleanup failed')
+      }
+    } catch {
+      setCleanupMsg('Cleanup failed')
+    }
+    setTimeout(() => setCleanupMsg(null), 3000)
+  }
+
+  const searchLower = searchText.toLowerCase()
+  const filtered = !searchLower ? tags : tags.filter(t => {
+    const id   = (t.tag_id || t.name || '').toLowerCase()
+    const desc = (t.description || '').toLowerCase()
+    const type = (t.instrument_type || '').toLowerCase()
+    const area = (t.area || '').toLowerCase()
+    return id.includes(searchLower) || desc.includes(searchLower) ||
+           type.includes(searchLower) || area.includes(searchLower)
+  })
+
+  const groups = {}
+  for (const tag of filtered) {
+    const prefix = ((tag.tag_id || tag.name || '').split('-')[0] || 'OTHER').toUpperCase()
+    if (!groups[prefix]) groups[prefix] = []
+    groups[prefix].push(tag)
+  }
+  const groupKeys = Object.keys(groups).sort()
+
+  const handleSelect = (tag) => {
+    setSelectedTag(tag)
+    onSelectTag(tag)
+  }
 
   return (
     <div style={{
       width: 240, flexShrink: 0,
-      background: PANEL, borderRight: `1px solid ${BORDER}`,
-      display: 'flex', flexDirection: 'column',
-      overflow: 'hidden',
+      background: '#030e1a', borderRight: '1px solid #081828',
+      display: 'flex', flexDirection: 'column', overflow: 'hidden',
     }}>
       {/* Header */}
-      <div style={{
-        padding: '10px 12px 8px',
-        borderBottom: `1px solid ${BORDER}`,
-      }}>
-        <span style={{ fontFamily: MONO, fontSize: 9, color: TEXTD, letterSpacing: 2 }}>
-          WORKSPACE
-        </span>
+      <div style={{ padding: '8px 10px', borderBottom: '1px solid #081828', background: '#041220', flexShrink: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 5 }}>
+          <input
+            value={searchText}
+            onChange={e => setSearchText(e.target.value)}
+            placeholder="Search tags…"
+            style={{
+              flex: 1, background: '#0d2035',
+              border: `1px solid ${searchText ? '#38bdf860' : '#1e3a5f'}`,
+              color: '#e2e8f0', fontFamily: MONO, fontSize: 10,
+              padding: '3px 6px', borderRadius: 3, outline: 'none',
+            }}
+          />
+          <button
+            onClick={() => setShowAddForm(v => !v)}
+            title="Add tag"
+            style={{
+              background: showAddForm ? '#1e3a5f' : '#1d4ed8', border: 'none',
+              color: '#ffffff', fontFamily: MONO, fontSize: 13,
+              padding: '1px 7px', borderRadius: 3, cursor: 'pointer', flexShrink: 0, lineHeight: 1.4,
+            }}
+          >+</button>
+        </div>
+        <div style={{ fontFamily: MONO, fontSize: 9, color: '#64748b' }}>
+          {filtered.length} tag{filtered.length !== 1 ? 's' : ''}
+        </div>
       </div>
 
-      {/* Tree */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '6px 8px' }}>
-        {groups.length === 0 && (
-          <div style={{ padding: '20px 8px', textAlign: 'center', color: TEXTD, fontFamily: MONO, fontSize: 10 }}>
-            No tags indexed
+      {/* Add tag form */}
+      {showAddForm && (
+        <AddTagForm
+          onSave={data => { onCreateTag(data); setShowAddForm(false) }}
+          onCancel={() => setShowAddForm(false)}
+        />
+      )}
+
+      {/* Tag list */}
+      <div style={{ flex: 1, overflowY: 'auto' }}>
+        {filtered.length === 0 && (
+          <div style={{ padding: '24px 12px', textAlign: 'center', color: '#64748b', fontFamily: MONO, fontSize: 10, lineHeight: 1.8 }}>
+            {searchText ? `No results for\n"${searchText}"` : 'No tags.\nClick + to add one.'}
           </div>
         )}
-        {groups.map(([key, groupTags]) => (
-          <div key={key} style={{ marginBottom: 4 }}>
-            {/* Group header */}
-            <button
-              onClick={() => toggleGroup(key)}
-              style={{
-                width: '100%', background: 'transparent', border: 'none',
-                display: 'flex', alignItems: 'center', gap: 6,
-                padding: '4px 8px', cursor: 'pointer', borderRadius: 3,
-              }}
-            >
-              <span style={{
-                fontFamily: MONO, fontSize: 8, color: TEXTD,
-                letterSpacing: 1.5, userSelect: 'none',
-              }}>
-                {collapsed[key] ? '▸' : '▾'} {key}
-              </span>
-              <span style={{
-                fontFamily: MONO, fontSize: 8,
-                background: BORDER2, color: TEXTM,
-                borderRadius: 8, padding: '0 5px',
-              }}>
-                {groupTags.length}
-              </span>
-            </button>
-
-            {/* Tag items */}
-            {!collapsed[key] && (
-              <div style={{ paddingLeft: 8 }}>
-                {groupTags.map(tag => (
-                  <TagItem
-                    key={tag.id}
-                    tag={tag}
-                    isActive={activeTag?.id === tag.id}
-                    onClick={() => onSelectTag(tag)}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
+        {groupKeys.map(key => (
+          <TagGroup
+            key={key}
+            prefix={key}
+            tags={groups[key]}
+            selectedId={selectedTag?.id}
+            activeId={activeTag?.id}
+            searchText={searchText}
+            onSelect={handleSelect}
+          />
         ))}
       </div>
 
-      {/* Bottom actions */}
+      {/* Tag detail card */}
+      {selectedTag && (
+        <TagDetailCard
+          key={selectedTag.id}
+          tag={selectedTag}
+          onClose={() => setSelectedTag(null)}
+          onUpdate={data => { onUpdateTag(data); setSelectedTag(prev => prev ? { ...prev, ...data } : null) }}
+          onDelete={tagId => { onDeleteTag(tagId); setSelectedTag(null); onSelectTag(null) }}
+          onCopy={(tagId, newId) => onCopyTag(tagId, newId)}
+        />
+      )}
+
+      {/* Bottom action buttons */}
       <div style={{
-        padding: 10, borderTop: `1px solid ${BORDER}`,
-        display: 'flex', flexDirection: 'column', gap: 6,
+        padding: 8, borderTop: '1px solid #081828', background: '#030e1a',
+        display: 'flex', flexDirection: 'column', gap: 6, flexShrink: 0,
       }}>
-        <ActionButton icon="＋" label="Add Documents"      onClick={onAddDocs}  />
-        <ActionButton icon="↺" label="Re-index Workspace"  onClick={onReindex} dim />
+        <button
+          onClick={onAddDocs}
+          onMouseEnter={() => setHoverAdd(true)}
+          onMouseLeave={() => setHoverAdd(false)}
+          style={{
+            width: '100%', background: hoverAdd ? '#1e3a5f' : '#0d2035',
+            border: '1px solid #1e3a5f', color: '#38bdf8',
+            fontFamily: MONO, fontSize: 11,
+            padding: 8, borderRadius: 3, cursor: 'pointer',
+            transition: 'background .12s',
+          }}
+        >＋ Add Documents</button>
+        <button
+          onClick={handleCleanup}
+          onMouseEnter={() => setHoverCleanup(true)}
+          onMouseLeave={() => setHoverCleanup(false)}
+          style={{
+            width: '100%', background: '#030e1a',
+            border: '1px solid #081828',
+            color: cleanupMsg ? '#94a3b8' : hoverCleanup ? '#94a3b8' : '#64748b',
+            fontFamily: MONO, fontSize: 10,
+            padding: 6, borderRadius: 3, cursor: 'pointer',
+            transition: 'color .12s',
+          }}
+        >{cleanupMsg ?? '🧹 Clean Orphaned Files'}</button>
+        <button
+          onClick={handleReindexClick}
+          onMouseEnter={() => setHoverReindex(true)}
+          onMouseLeave={() => setHoverReindex(false)}
+          style={{
+            width: '100%', background: '#030e1a',
+            border: '1px solid #081828',
+            color: reindexing ? '#94a3b8' : hoverReindex ? '#94a3b8' : '#64748b',
+            fontFamily: MONO, fontSize: 10,
+            padding: 6, borderRadius: 3, cursor: 'pointer',
+            transition: 'color .12s',
+          }}
+        >{reindexing ? '↺ Re-indexing…' : '↺ Re-index Workspace'}</button>
       </div>
     </div>
   )
 }
 
-function TagItem({ tag, isActive, onClick }) {
-  const hasErrors = (tag.errorCount ?? 0) > 0
-  const issueCount = tag.issueCount ?? 0
-  const coverage   = tag.coverage ?? 0
+function TagGroup({ prefix, tags, selectedId, activeId, searchText, onSelect }) {
+  const [open, setOpen] = useState(true)
+  return (
+    <div>
+      <div
+        onClick={() => setOpen(v => !v)}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 6,
+          padding: '4px 10px', cursor: 'pointer', background: '#051525',
+          borderBottom: '1px solid #081828', userSelect: 'none',
+        }}
+      >
+        <span style={{ fontFamily: MONO, fontSize: 9, color: '#38bdf8', letterSpacing: .5, flex: 1 }}>
+          {open ? '▾' : '▸'} {prefix}
+        </span>
+        <span style={{ fontFamily: MONO, fontSize: 9, color: '#64748b' }}>{tags.length}</span>
+      </div>
+      {open && tags.map(tag => (
+        <TagRow
+          key={tag.id}
+          tag={tag}
+          selected={tag.id === selectedId}
+          active={tag.id === activeId}
+          searchText={searchText}
+          onSelect={() => onSelect(tag)}
+        />
+      ))}
+    </div>
+  )
+}
+
+function TagRow({ tag, selected, active, searchText, onSelect }) {
+  const [hover, setHover] = useState(false)
+  const tagId      = tag.tag_id || tag.name || ''
+  const statusColor = tag.status === 'active' ? '#22c55e' : tag.status === 'inactive' ? '#475569' : '#f59e0b'
+  const docCount   = tag.doc_count ?? tag.docCount ?? 0
+  const issueCount = tag.issue_count ?? tag.issueCount ?? 0
 
   return (
     <div
-      onClick={onClick}
+      onClick={onSelect}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
       style={{
-        padding: '6px 8px', marginBottom: 2,
-        background: isActive ? ACCENTD : 'transparent',
-        border: `1px solid ${isActive ? ACCENT + '30' : 'transparent'}`,
-        borderRadius: 4, cursor: 'pointer',
-        transition: 'background .15s',
+        display: 'flex', alignItems: 'flex-start', gap: 6,
+        padding: '6px 10px 6px 12px',
+        background: selected ? '#0d3a5c' : hover ? '#0d2035' : 'transparent',
+        borderLeft: `3px solid ${active ? '#38bdf8' : 'transparent'}`,
+        cursor: 'pointer', transition: 'all .1s',
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-        {hasErrors && <PulsingDot />}
-        <span style={{
-          fontFamily: MONO, fontSize: 11,
-          color: isActive ? ACCENT : TEXT, flex: 1,
-          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-        }}>
-          {tag.name}
-        </span>
-        {issueCount > 0 && (
+      <span style={{ width: 6, height: 6, borderRadius: '50%', background: statusColor, flexShrink: 0, marginTop: 3 }} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
           <span style={{
-            background: ERR + '25', color: ERR,
-            fontFamily: MONO, fontSize: 9,
-            padding: '1px 5px', borderRadius: 8,
+            fontFamily: MONO, fontSize: 10, color: '#38bdf8', fontWeight: 700,
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1,
           }}>
-            {issueCount}
+            {highlightText(tagId, searchText)}
           </span>
+          {docCount > 0 && (
+            <span style={{ fontFamily: MONO, fontSize: 8, background: '#0d2035', color: '#64748b', border: '1px solid #1e3a5f', borderRadius: 8, padding: '0 4px', flexShrink: 0 }}>
+              {docCount}
+            </span>
+          )}
+          {issueCount > 0 && (
+            <span style={{ fontFamily: MONO, fontSize: 8, background: '#7f1d1d', color: '#f87171', borderRadius: 8, padding: '0 4px', flexShrink: 0 }}>
+              {issueCount}
+            </span>
+          )}
+        </div>
+        {tag.description && (
+          <div style={{ fontFamily: SANS, fontSize: 9, color: '#64748b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 1 }}>
+            {highlightText(tag.description.length > 38 ? tag.description.slice(0, 38) + '…' : tag.description, searchText)}
+          </div>
         )}
       </div>
-      <CoverageBar pct={coverage} />
     </div>
   )
 }
 
-function ActionButton({ icon, label, onClick, dim }) {
-  const [hover, setHover] = useState(false)
+function AddTagForm({ onSave, onCancel }) {
+  const [form, setForm] = useState({ tag_id: '', description: '', instrument_type: '', area: '', make: '', model: '', notes: '' })
+  const iStyle = { width: '100%', background: '#0d2035', border: '1px solid #1e3a5f', color: '#e2e8f0', fontFamily: MONO, fontSize: 10, padding: '3px 6px', borderRadius: 3, outline: 'none', boxSizing: 'border-box', marginBottom: 4 }
+  const lStyle = { fontFamily: MONO, fontSize: 8, color: '#64748b', marginBottom: 2, marginTop: 4, display: 'block' }
+
   return (
-    <button
-      onClick={onClick}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={{
-        background: hover ? (dim ? BORDER2 : ACCENTD) : BORDER,
-        border: `1px solid ${hover ? (dim ? BORDER2 : ACCENT + '40') : BORDER}`,
-        color: hover ? (dim ? TEXTM : ACCENT) : TEXTM,
-        fontFamily: MONO, fontSize: 10,
-        padding: '6px 10px', borderRadius: 4,
-        cursor: 'pointer', textAlign: 'left',
-        display: 'flex', alignItems: 'center', gap: 7,
-        transition: 'all .15s',
-      }}
-    >
-      <span style={{ fontSize: 12 }}>{icon}</span>
-      {label}
-    </button>
+    <div style={{ padding: '8px 10px', borderBottom: '1px solid #081828', background: '#041220', flexShrink: 0 }}>
+      <div style={{ fontFamily: MONO, fontSize: 9, color: '#38bdf8', marginBottom: 6, letterSpacing: .5 }}>NEW TAG</div>
+      <label style={lStyle}>TAG ID *</label>
+      <input
+        autoFocus placeholder="e.g. FT-1001"
+        value={form.tag_id}
+        onChange={e => setForm(p => ({ ...p, tag_id: e.target.value }))}
+        onKeyDown={e => e.key === 'Escape' && onCancel()}
+        style={iStyle}
+      />
+      <label style={lStyle}>DESCRIPTION</label>
+      <input
+        placeholder="e.g. Flow Transmitter — Unit 3"
+        value={form.description}
+        onChange={e => setForm(p => ({ ...p, description: e.target.value }))}
+        style={iStyle}
+      />
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 6px' }}>
+        <div>
+          <label style={lStyle}>INSTRUMENT TYPE</label>
+          <input placeholder="FT" value={form.instrument_type} onChange={e => setForm(p => ({ ...p, instrument_type: e.target.value }))} style={iStyle} />
+        </div>
+        <div>
+          <label style={lStyle}>AREA</label>
+          <input placeholder="Default" value={form.area} onChange={e => setForm(p => ({ ...p, area: e.target.value }))} style={iStyle} />
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 4, marginTop: 4 }}>
+        <button
+          onClick={() => { if (form.tag_id.trim()) onSave(form) }}
+          style={{ background: '#1d4ed8', border: 'none', color: '#ffffff', fontFamily: MONO, fontSize: 9, padding: '3px 10px', borderRadius: 3, cursor: 'pointer' }}
+        >Add Tag</button>
+        <button
+          onClick={onCancel}
+          style={{ background: '#0d2035', border: '1px solid #1e3a5f', color: '#94a3b8', fontFamily: MONO, fontSize: 9, padding: '3px 10px', borderRadius: 3, cursor: 'pointer' }}
+        >Cancel</button>
+      </div>
+    </div>
+  )
+}
+
+function TagDetailCard({ tag, onClose, onUpdate, onDelete, onCopy }) {
+  const [editing,       setEditing]       = useState(false)
+  const [copying,       setCopying]       = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const [copyId,        setCopyId]        = useState('')
+  const [form, setForm] = useState({
+    tag_id:          tag.tag_id || tag.name || '',
+    description:     tag.description     || '',
+    instrument_type: tag.instrument_type || '',
+    area:            tag.area            || '',
+    make:            tag.make            || '',
+    model:           tag.model           || '',
+    status:          tag.status          || 'active',
+    notes:           tag.notes           || '',
+  })
+
+  const tagId       = tag.tag_id || tag.name || ''
+  const statusColor = tag.status === 'active' ? '#22c55e' : tag.status === 'inactive' ? '#475569' : '#f59e0b'
+  const docCount    = tag.doc_count ?? tag.docCount ?? 0
+  const issueCount  = tag.issue_count ?? tag.issueCount ?? 0
+
+  const iStyle = { width: '100%', background: '#0d2035', border: '1px solid #1e3a5f', color: '#e2e8f0', fontFamily: MONO, fontSize: 10, padding: '3px 6px', borderRadius: 3, outline: 'none', boxSizing: 'border-box', marginBottom: 4 }
+  const lStyle = { fontFamily: MONO, fontSize: 8, color: '#64748b', marginBottom: 2, marginTop: 4, display: 'block' }
+
+  return (
+    <div style={{ borderTop: '1px solid #081828', background: '#030e1a', padding: '10px 12px', flexShrink: 0, maxHeight: 340, overflowY: 'auto' }}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 6 }}>
+        <span style={{ fontFamily: MONO, fontSize: 12, color: '#38bdf8', fontWeight: 700, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {tagId}
+        </span>
+        <span style={{ width: 7, height: 7, borderRadius: '50%', background: statusColor, flexShrink: 0 }} />
+        <button onClick={onClose} style={{ background: 'transparent', border: 'none', color: '#64748b', cursor: 'pointer', fontSize: 14, padding: '0 2px', flexShrink: 0 }}>×</button>
+      </div>
+
+      {/* Action buttons */}
+      {!editing && !confirmDelete && (
+        <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
+          <button onClick={() => setEditing(true)} style={{ background: '#0d2035', border: '1px solid #1e3a5f', color: '#e2e8f0', fontFamily: MONO, fontSize: 9, padding: '3px 8px', borderRadius: 3, cursor: 'pointer' }}>Edit</button>
+          <button onClick={() => setCopying(v => !v)} style={{ background: '#0d2035', border: '1px solid #1e3a5f', color: '#e2e8f0', fontFamily: MONO, fontSize: 9, padding: '3px 8px', borderRadius: 3, cursor: 'pointer' }}>Copy</button>
+          <button onClick={() => setConfirmDelete(true)} style={{ background: '#7f1d1d', border: '1px solid #991b1b', color: '#f87171', fontFamily: MONO, fontSize: 9, padding: '3px 8px', borderRadius: 3, cursor: 'pointer' }}>Delete</button>
+        </div>
+      )}
+
+      {/* Copy input */}
+      {copying && (
+        <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
+          <input
+            autoFocus placeholder="New tag ID…" value={copyId}
+            onChange={e => setCopyId(e.target.value)}
+            onKeyDown={e => e.key === 'Escape' && setCopying(false)}
+            style={{ flex: 1, background: '#0d2035', border: '1px solid #1e3a5f', color: '#e2e8f0', fontFamily: MONO, fontSize: 10, padding: '3px 6px', borderRadius: 3, outline: 'none' }}
+          />
+          <button onClick={() => { if (copyId.trim()) { onCopy(tagId, copyId.trim()); setCopying(false); setCopyId('') } }} style={{ background: '#1d4ed8', border: 'none', color: '#ffffff', fontFamily: MONO, fontSize: 9, padding: '3px 8px', borderRadius: 3, cursor: 'pointer' }}>Copy</button>
+          <button onClick={() => { setCopying(false); setCopyId('') }} style={{ background: '#0d2035', border: '1px solid #1e3a5f', color: '#94a3b8', fontFamily: MONO, fontSize: 9, padding: '2px 6px', borderRadius: 3, cursor: 'pointer' }}>✕</button>
+        </div>
+      )}
+
+      {/* Delete confirm */}
+      {confirmDelete && (
+        <div style={{ marginBottom: 8, padding: '6px 8px', background: '#1c0a0a', border: '1px solid #7f1d1d', borderRadius: 4 }}>
+          <div style={{ fontFamily: SANS, fontSize: 10, color: '#f87171', marginBottom: 6, lineHeight: 1.4 }}>
+            Delete {tagId}? This will remove the tag and all linked data. Cannot be undone.
+          </div>
+          <div style={{ display: 'flex', gap: 4 }}>
+            <button onClick={() => { onDelete(tagId); setConfirmDelete(false) }} style={{ background: '#7f1d1d', border: '1px solid #991b1b', color: '#f87171', fontFamily: MONO, fontSize: 9, padding: '3px 8px', borderRadius: 3, cursor: 'pointer' }}>Delete</button>
+            <button onClick={() => setConfirmDelete(false)} style={{ background: '#0d2035', border: '1px solid #1e3a5f', color: '#94a3b8', fontFamily: MONO, fontSize: 9, padding: '3px 8px', borderRadius: 3, cursor: 'pointer' }}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {/* Edit form */}
+      {editing ? (
+        <div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 8px' }}>
+            <div>
+              <label style={lStyle}>TAG ID</label>
+              <input disabled value={form.tag_id} style={{ ...iStyle, opacity: 0.5 }} />
+            </div>
+            <div>
+              <label style={lStyle}>INSTRUMENT TYPE</label>
+              <input value={form.instrument_type} onChange={e => setForm(p => ({ ...p, instrument_type: e.target.value }))} style={iStyle} />
+            </div>
+            <div>
+              <label style={lStyle}>AREA / UNIT</label>
+              <input value={form.area} onChange={e => setForm(p => ({ ...p, area: e.target.value }))} style={iStyle} />
+            </div>
+            <div>
+              <label style={lStyle}>STATUS</label>
+              <select value={form.status} onChange={e => setForm(p => ({ ...p, status: e.target.value }))} style={{ ...iStyle, cursor: 'pointer' }}>
+                <option value="active">active</option>
+                <option value="inactive">inactive</option>
+                <option value="unknown">unknown</option>
+              </select>
+            </div>
+            <div>
+              <label style={lStyle}>MAKE</label>
+              <input value={form.make} onChange={e => setForm(p => ({ ...p, make: e.target.value }))} style={iStyle} />
+            </div>
+            <div>
+              <label style={lStyle}>MODEL</label>
+              <input value={form.model} onChange={e => setForm(p => ({ ...p, model: e.target.value }))} style={iStyle} />
+            </div>
+          </div>
+          <label style={lStyle}>DESCRIPTION</label>
+          <input value={form.description} onChange={e => setForm(p => ({ ...p, description: e.target.value }))} style={iStyle} />
+          <label style={lStyle}>NOTES</label>
+          <textarea value={form.notes} onChange={e => setForm(p => ({ ...p, notes: e.target.value }))} rows={2} style={{ ...iStyle, resize: 'none', fontFamily: SANS }} />
+          <div style={{ display: 'flex', gap: 4, marginTop: 4 }}>
+            <button onClick={() => { onUpdate({ ...form }); setEditing(false) }} style={{ background: '#1d4ed8', border: 'none', color: '#ffffff', fontFamily: MONO, fontSize: 9, padding: '3px 10px', borderRadius: 3, cursor: 'pointer' }}>Save Changes</button>
+            <button onClick={() => setEditing(false)} style={{ background: '#0d2035', border: '1px solid #1e3a5f', color: '#94a3b8', fontFamily: MONO, fontSize: 9, padding: '3px 10px', borderRadius: 3, cursor: 'pointer' }}>Cancel</button>
+          </div>
+        </div>
+      ) : (
+        /* View mode */
+        <div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 8px', marginBottom: 6 }}>
+            <div>
+              <div style={{ fontFamily: MONO, fontSize: 8, color: '#64748b' }}>TAG ID</div>
+              <div style={{ fontFamily: MONO, fontSize: 10, color: '#38bdf8' }}>{tagId}</div>
+            </div>
+            <div>
+              <div style={{ fontFamily: MONO, fontSize: 8, color: '#64748b' }}>INSTRUMENT TYPE</div>
+              <div style={{ fontFamily: MONO, fontSize: 10, color: '#e2e8f0' }}>{tag.instrument_type || '—'}</div>
+            </div>
+            <div>
+              <div style={{ fontFamily: MONO, fontSize: 8, color: '#64748b' }}>AREA / UNIT</div>
+              <div style={{ fontFamily: MONO, fontSize: 10, color: '#e2e8f0' }}>{tag.area || '—'}</div>
+            </div>
+            <div>
+              <div style={{ fontFamily: MONO, fontSize: 8, color: '#64748b' }}>STATUS</div>
+              <div style={{ fontFamily: MONO, fontSize: 10, color: statusColor }}>{tag.status || 'unknown'}</div>
+            </div>
+            <div>
+              <div style={{ fontFamily: MONO, fontSize: 8, color: '#64748b' }}>MAKE</div>
+              <div style={{ fontFamily: MONO, fontSize: 10, color: '#e2e8f0' }}>{tag.make || '—'}</div>
+            </div>
+            <div>
+              <div style={{ fontFamily: MONO, fontSize: 8, color: '#64748b' }}>MODEL</div>
+              <div style={{ fontFamily: MONO, fontSize: 10, color: '#e2e8f0' }}>{tag.model || '—'}</div>
+            </div>
+          </div>
+          {tag.description && (
+            <div style={{ marginBottom: 4 }}>
+              <div style={{ fontFamily: MONO, fontSize: 8, color: '#64748b' }}>DESCRIPTION</div>
+              <div style={{ fontFamily: SANS, fontSize: 10, color: '#94a3b8', lineHeight: 1.4 }}>{tag.description}</div>
+            </div>
+          )}
+          {tag.notes && (
+            <div style={{ marginBottom: 4 }}>
+              <div style={{ fontFamily: MONO, fontSize: 8, color: '#64748b' }}>NOTES</div>
+              <div style={{ fontFamily: SANS, fontSize: 10, color: '#94a3b8', lineHeight: 1.4 }}>{tag.notes}</div>
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 6, alignItems: 'center' }}>
+            {docCount > 0   && <Badge bg='#0c2a1a' color='#34d399'>{docCount} docs</Badge>}
+            {issueCount > 0 && <Badge bg='#7f1d1d' color='#f87171'>{issueCount} issues</Badge>}
+            {tag.created_at && <span style={{ fontFamily: MONO, fontSize: 8, color: '#64748b' }}>{relativeTime(tag.created_at)}</span>}
+          </div>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -590,9 +996,360 @@ function LoadingBubble() {
 
 // ── Right Panel ───────────────────────────────────────────────────────────────
 
-const TABS = ['DOCUMENTS', 'ISSUES', 'WIRING', 'HISTORY']
+const TABS = ['DOCS', 'ISSUES', 'WIRING', 'HISTORY', 'STANDARDS']
 
-function RightPanel({ activeTag, docs, issues, activeTab, onTabChange, onClassifyIssue }) {
+// ── Standards Tab ─────────────────────────────────────────────────────────────
+
+const STD_PURPLE = '#a855f7'
+const STD_PURPLED = '#3b0764'
+
+function StandardsTab({ standards, onDelete, onAdd, onAddFolder }) {
+  const [addPath,    setAddPath]    = useState('')
+  const [addTitle,   setAddTitle]   = useState('')
+  const [addCat,     setAddCat]     = useState('General')
+  const [addYear,    setAddYear]    = useState('')
+  const [addForm,    setAddForm]    = useState(false)
+  const [busy,       setBusy]       = useState(false)
+  const [err,        setErr]        = useState('')
+
+  // Group by category
+  const byCategory = {}
+  for (const s of (standards ?? [])) {
+    const cat = s.category || 'General'
+    if (!byCategory[cat]) byCategory[cat] = []
+    byCategory[cat].push(s)
+  }
+
+  async function handleAdd() {
+    if (!addPath.trim()) return
+    setBusy(true); setErr('')
+    try {
+      const res = await window.engram?.addStandard?.(addPath.trim(), {
+        title:    addTitle.trim() || null,
+        category: addCat.trim()  || 'General',
+        year:     addYear.trim() || null,
+      })
+      if (res?.ok) {
+        setAddForm(false); setAddPath(''); setAddTitle(''); setAddYear('')
+        onAdd?.()
+      } else {
+        setErr(res?.error ?? 'Failed')
+      }
+    } catch (e) { setErr(e.message) }
+    setBusy(false)
+  }
+
+  async function handleAddFolder() {
+    const path = await window.engram?.openFolder?.()
+    if (!path) return
+    setBusy(true); setErr('')
+    try {
+      const res = await window.engram?.addStandardsFolder?.(path, { category: addCat.trim() || 'General' })
+      if (res?.ok) onAdd?.()
+      else setErr(res?.error ?? 'Failed')
+    } catch (e) { setErr(e.message) }
+    setBusy(false)
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      {/* Header */}
+      <div style={{
+        padding: '10px 12px', borderBottom: `1px solid ${BORDER}`,
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0,
+      }}>
+        <span style={{ fontFamily: MONO, fontSize: 9, color: STD_PURPLE, letterSpacing: 1 }}>
+          STANDARDS & POLICY
+        </span>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button onClick={handleAddFolder} disabled={busy} style={{
+            background: STD_PURPLED, border: `1px solid ${STD_PURPLE}40`,
+            color: STD_PURPLE, fontFamily: MONO, fontSize: 8, padding: '3px 8px',
+            borderRadius: 3, cursor: 'pointer',
+          }}>+ FOLDER</button>
+          <button onClick={() => setAddForm(f => !f)} style={{
+            background: addForm ? STD_PURPLED : 'transparent',
+            border: `1px solid ${STD_PURPLE}40`,
+            color: STD_PURPLE, fontFamily: MONO, fontSize: 8, padding: '3px 8px',
+            borderRadius: 3, cursor: 'pointer',
+          }}>+ FILE</button>
+        </div>
+      </div>
+
+      {/* Add file form */}
+      {addForm && (
+        <div style={{
+          padding: '10px 12px', borderBottom: `1px solid ${BORDER}`,
+          background: '#0d0620', display: 'flex', flexDirection: 'column', gap: 6, flexShrink: 0,
+        }}>
+          <input
+            placeholder="File path..."
+            value={addPath}
+            onChange={e => setAddPath(e.target.value)}
+            style={{
+              background: BORDER2, border: `1px solid ${STD_PURPLE}30`, color: TEXT,
+              fontFamily: MONO, fontSize: 9, padding: '4px 8px', borderRadius: 3, outline: 'none',
+            }}
+          />
+          <input
+            placeholder="Title (optional)"
+            value={addTitle}
+            onChange={e => setAddTitle(e.target.value)}
+            style={{
+              background: BORDER2, border: `1px solid ${STD_PURPLE}30`, color: TEXT,
+              fontFamily: MONO, fontSize: 9, padding: '4px 8px', borderRadius: 3, outline: 'none',
+            }}
+          />
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input
+              placeholder="Category"
+              value={addCat}
+              onChange={e => setAddCat(e.target.value)}
+              style={{
+                flex: 1, background: BORDER2, border: `1px solid ${STD_PURPLE}30`, color: TEXT,
+                fontFamily: MONO, fontSize: 9, padding: '4px 8px', borderRadius: 3, outline: 'none',
+              }}
+            />
+            <input
+              placeholder="Year"
+              value={addYear}
+              onChange={e => setAddYear(e.target.value)}
+              style={{
+                width: 60, background: BORDER2, border: `1px solid ${STD_PURPLE}30`, color: TEXT,
+                fontFamily: MONO, fontSize: 9, padding: '4px 8px', borderRadius: 3, outline: 'none',
+              }}
+            />
+          </div>
+          {err && <div style={{ fontFamily: MONO, fontSize: 9, color: ERR }}>{err}</div>}
+          <button onClick={handleAdd} disabled={busy} style={{
+            background: STD_PURPLE, border: 'none', color: '#fff',
+            fontFamily: MONO, fontSize: 9, padding: '5px', borderRadius: 3, cursor: 'pointer',
+          }}>{busy ? 'Adding…' : 'Add Standard'}</button>
+        </div>
+      )}
+
+      {/* Document list + Registry — scrollable area */}
+      <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
+        <div style={{ padding: '8px 0' }}>
+          {Object.keys(byCategory).length === 0 ? (
+            <div style={{
+              padding: 24, textAlign: 'center',
+              color: TEXTD, fontFamily: MONO, fontSize: 10, lineHeight: 1.8,
+            }}>
+              No standards indexed.<br />Add files or a folder above.
+            </div>
+          ) : (
+            Object.entries(byCategory).map(([cat, items]) => (
+              <div key={cat}>
+                <div style={{
+                  padding: '4px 12px', fontFamily: MONO, fontSize: 8,
+                  color: STD_PURPLE, letterSpacing: 1, textTransform: 'uppercase',
+                  borderBottom: `1px solid ${BORDER}`, marginBottom: 2,
+                }}>{cat}</div>
+                {items.map(s => (
+                  <div key={s.id} style={{
+                    padding: '6px 12px', display: 'flex', alignItems: 'flex-start',
+                    gap: 8, borderBottom: `1px solid ${BORDER}08`,
+                  }}>
+                    <div style={{
+                      width: 3, height: 3, borderRadius: '50%',
+                      background: STD_PURPLE, flexShrink: 0, marginTop: 5,
+                    }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{
+                        fontFamily: MONO, fontSize: 9, color: TEXT,
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }}>{s.title || s.filename}</div>
+                      <div style={{ fontFamily: MONO, fontSize: 8, color: TEXTM, marginTop: 1 }}>
+                        {s.year ? `${s.year} · ` : ''}{s.filename}
+                      </div>
+                    </div>
+                    <button onClick={() => onDelete?.(s.id)} style={{
+                      background: 'transparent', border: 'none', color: TEXTM,
+                      cursor: 'pointer', fontSize: 10, padding: '0 2px', flexShrink: 0,
+                    }} title="Remove">×</button>
+                  </div>
+                ))}
+              </div>
+            ))
+          )}
+        </div>
+
+        {/* Standards Registry notepad */}
+        <div style={{ borderTop: `1px solid ${BORDER}` }}>
+          <RegistryNotepad />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+const REG_CATS = ['General', 'Instrumentation', 'Safety', 'Process Control', 'Electrical', 'Mechanical', 'Environmental', 'Quality']
+
+const REG_DEFAULTS = [
+  { standard_number: 'ISA-5.1',     standard_name: 'Instrumentation Symbols',  category: 'Instrumentation', notes: '' },
+  { standard_number: 'ISA-18.2',    standard_name: 'Alarm Management',          category: 'Instrumentation', notes: '' },
+  { standard_number: 'IEC 61511',   standard_name: 'Functional Safety',         category: 'Safety',          notes: '' },
+  { standard_number: 'ISA-88',      standard_name: 'Batch Control',             category: 'Process Control', notes: '' },
+  { standard_number: 'ISO 10628-2', standard_name: 'P&ID Symbols',              category: 'Engineering',     notes: '' },
+]
+
+const INPUT_STYLE = {
+  background: 'transparent', border: 'none',
+  borderBottom: '1px solid #0d2035',
+  color: 'inherit', padding: '4px 6px',
+  fontFamily: '"IBM Plex Mono", monospace',
+  fontSize: 11, outline: 'none',
+}
+
+function RegistryNotepad() {
+  const [rows,   setRows]   = useState([])
+  const [saved,  setSaved]  = useState(false)
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    window.engram?.listRegistry?.()
+      .then(res => {
+        if (res?.ok) {
+          const items = res.standards ?? []
+          setRows(items.length > 0 ? items : REG_DEFAULTS.map((d, i) => ({ ...d, id: -(i + 1) })))
+        }
+      })
+      .catch(() => setRows(REG_DEFAULTS.map((d, i) => ({ ...d, id: -(i + 1) }))))
+  }, [])
+
+  function updateRow(idx, field, value) {
+    setRows(prev => prev.map((r, i) => i === idx ? { ...r, [field]: value } : r))
+    setSaved(false)
+  }
+
+  function addRow() {
+    setRows(prev => [...prev, { id: -Date.now(), standard_number: '', standard_name: '', category: 'General', notes: '' }])
+    setSaved(false)
+  }
+
+  function removeRow(idx) {
+    setRows(prev => prev.filter((_, i) => i !== idx))
+    setSaved(false)
+  }
+
+  async function handleSave() {
+    setSaving(true)
+    try {
+      await window.engram?.saveRegistry?.(rows)
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2000)
+    } catch (_) {}
+    setSaving(false)
+  }
+
+  return (
+    <div style={{
+      margin: '12px 10px 10px',
+      background: '#020c16', border: `1px solid ${BORDER2}`,
+      borderRadius: 6, padding: 12,
+    }}>
+      {/* Section header */}
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10,
+      }}>
+        <div>
+          <div style={{ fontFamily: MONO, fontSize: 10, color: TEXT, marginBottom: 2 }}>
+            Standards Registry
+          </div>
+          <div style={{ fontFamily: MONO, fontSize: 8, color: TEXTM }}>
+            Standards applied to all reviews
+          </div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <div style={{
+            width: 6, height: 6, borderRadius: '50%',
+            background: OK, flexShrink: 0,
+          }} />
+          <span style={{ fontFamily: MONO, fontSize: 9, color: OK }}>
+            {rows.filter(r => r.standard_number?.trim()).length} active
+          </span>
+        </div>
+      </div>
+
+      {/* Rows */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {rows.map((row, idx) => (
+          <div key={row.id ?? idx} style={{ display: 'flex', alignItems: 'center', gap: 0, borderBottom: `1px solid ${BORDER}` }}>
+            <input
+              value={row.standard_number ?? ''}
+              onChange={e => updateRow(idx, 'standard_number', e.target.value)}
+              placeholder="ISA-5.1"
+              style={{ ...INPUT_STYLE, width: 90, color: ACCENT }}
+              onFocus={e => e.target.style.borderBottomColor = ACCENT}
+              onBlur={e => e.target.style.borderBottomColor = '#0d2035'}
+            />
+            <input
+              value={row.standard_name ?? ''}
+              onChange={e => updateRow(idx, 'standard_name', e.target.value)}
+              placeholder="Description"
+              style={{ ...INPUT_STYLE, width: 150, color: TEXT }}
+              onFocus={e => e.target.style.borderBottomColor = ACCENT}
+              onBlur={e => e.target.style.borderBottomColor = '#0d2035'}
+            />
+            <select
+              value={row.category ?? 'General'}
+              onChange={e => updateRow(idx, 'category', e.target.value)}
+              style={{
+                ...INPUT_STYLE, width: 120, color: TEXTM,
+                appearance: 'none', cursor: 'pointer',
+              }}
+              onFocus={e => e.target.style.borderBottomColor = ACCENT}
+              onBlur={e => e.target.style.borderBottomColor = '#0d2035'}
+            >
+              {REG_CATS.map(c => <option key={c} value={c} style={{ background: PANEL }}>{c}</option>)}
+            </select>
+            <input
+              value={row.notes ?? ''}
+              onChange={e => updateRow(idx, 'notes', e.target.value)}
+              placeholder="Scope or notes..."
+              style={{ ...INPUT_STYLE, flex: 1, color: '#94a3b8' }}
+              onFocus={e => e.target.style.borderBottomColor = ACCENT}
+              onBlur={e => e.target.style.borderBottomColor = '#0d2035'}
+            />
+            <button
+              onClick={() => removeRow(idx)}
+              style={{
+                background: 'transparent', border: 'none',
+                color: '#f87171', cursor: 'pointer',
+                fontFamily: MONO, fontSize: 14, width: 24, flexShrink: 0, padding: 0,
+              }}
+              title="Remove"
+            >×</button>
+          </div>
+        ))}
+      </div>
+
+      {/* Footer */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 10 }}>
+        <button
+          onClick={addRow}
+          style={{
+            background: 'transparent', border: 'none',
+            color: ACCENT, fontFamily: MONO, fontSize: 11, cursor: 'pointer', padding: 0,
+          }}
+        >+ Add Row</button>
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          style={{
+            background: BORDER2, border: `1px solid #1e3a5f`,
+            color: saved ? OK : ACCENT,
+            fontFamily: MONO, fontSize: 10, padding: '4px 12px',
+            borderRadius: 3, cursor: 'pointer',
+          }}
+        >{saved ? '✓ Saved' : saving ? 'Saving…' : '💾 Save Registry'}</button>
+      </div>
+    </div>
+  )
+}
+
+function RightPanel({ activeTag, allDocs, projects, currentProject, issues, activeTab, onTabChange, onClassifyIssue, onDeleteDoc, onReindexAll, onSetProject, onNewProject, onRenameDoc, standards, onStandardsRefresh }) {
   return (
     <div style={{
       width: 280, flexShrink: 0,
@@ -605,27 +1362,49 @@ function RightPanel({ activeTag, docs, issues, activeTab, onTabChange, onClassif
         display: 'flex', borderBottom: `1px solid ${BORDER}`,
         flexShrink: 0,
       }}>
-        {TABS.map(tab => (
-          <button
-            key={tab}
-            onClick={() => onTabChange(tab)}
-            style={{
-              flex: 1, background: 'transparent',
-              border: 'none', borderBottom: `2px solid ${activeTab === tab ? ACCENT : 'transparent'}`,
-              color: activeTab === tab ? ACCENT : TEXTM,
-              fontFamily: MONO, fontSize: 8, fontWeight: 700,
-              padding: '10px 0', cursor: 'pointer',
-              letterSpacing: .8, transition: 'color .15s',
-            }}
-          >
-            {tab}
-          </button>
-        ))}
+        {TABS.map(tab => {
+          const isStd    = tab === 'STANDARDS'
+          const tabColor = activeTab === tab ? (isStd ? STD_PURPLE : ACCENT) : TEXTM
+          const tabBorder = activeTab === tab ? (isStd ? STD_PURPLE : ACCENT) : 'transparent'
+          return (
+            <button
+              key={tab}
+              onClick={() => onTabChange(tab)}
+              style={{
+                flex: 1, background: 'transparent',
+                border: 'none', borderBottom: `2px solid ${tabBorder}`,
+                color: tabColor,
+                fontFamily: MONO, fontSize: 7, fontWeight: 700,
+                padding: '10px 0', cursor: 'pointer',
+                letterSpacing: .6, transition: 'color .15s',
+              }}
+            >
+              {tab}
+            </button>
+          )
+        })}
       </div>
 
       {/* Tab content */}
-      <div style={{ flex: 1, overflowY: 'auto' }}>
-        {!activeTag ? (
+      <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
+        {activeTab === 'STANDARDS' ? (
+          <StandardsTab
+            standards={standards}
+            onDelete={async (id) => { await window.engram?.deleteStandard?.(id); onStandardsRefresh?.() }}
+            onAdd={onStandardsRefresh}
+          />
+        ) : activeTab === 'DOCS' ? (
+          <DocsTreeTab
+            docs={allDocs}
+            projects={projects}
+            currentProject={currentProject}
+            onDelete={onDeleteDoc}
+            onReindexAll={onReindexAll}
+            onSetProject={onSetProject}
+            onNewProject={onNewProject}
+            onRename={onRenameDoc}
+          />
+        ) : !activeTag ? (
           <div style={{
             padding: 24, textAlign: 'center',
             color: TEXTD, fontFamily: MONO, fontSize: 10, lineHeight: 1.8,
@@ -634,10 +1413,9 @@ function RightPanel({ activeTag, docs, issues, activeTab, onTabChange, onClassif
           </div>
         ) : (
           <>
-            {activeTab === 'DOCUMENTS' && <DocumentsTab docs={docs} />}
-            {activeTab === 'ISSUES'    && <IssuesTab issues={issues} onClassify={onClassifyIssue} />}
-            {activeTab === 'WIRING'    && <WiringTab tagId={activeTag.id} />}
-            {activeTab === 'HISTORY'   && <HistoryTab tagId={activeTag.id} />}
+            {activeTab === 'ISSUES'  && <IssuesTab issues={issues} onClassify={onClassifyIssue} />}
+            {activeTab === 'WIRING'  && <WiringTab tagId={activeTag.id} />}
+            {activeTab === 'HISTORY' && <HistoryTab tagId={activeTag.id} />}
           </>
         )}
       </div>
@@ -679,6 +1457,466 @@ function DocCard({ doc }) {
           <Badge bg={WARN + '20'} color={WARN}>{doc.status}</Badge>
         )}
       </div>
+    </div>
+  )
+}
+
+// ── DocsTreeTab — project-based document tree ──────────────────────────────
+
+function DocsTreeTab({ docs, projects, currentProject, onDelete, onReindexAll, onSetProject, onNewProject, onRename }) {
+  const [selectedDoc,  setSelectedDoc]  = useState(null)
+  const [newProjName,  setNewProjName]  = useState('')
+  const [showNewProj,  setShowNewProj]  = useState(false)
+  const [searchText,   setSearchText]   = useState('')
+
+  const searchLower = searchText.toLowerCase()
+
+  const projectFiltered = currentProject === '__ALL__'
+    ? docs
+    : docs.filter(d => (d.project_name ?? 'Default') === currentProject)
+
+  const filtered = !searchLower ? projectFiltered : projectFiltered.filter(d => {
+    const name = (d.display_name || d.title || '').toLowerCase()
+    const desc = (d.description || '').toLowerCase()
+    return name.includes(searchLower) || desc.includes(searchLower) ||
+      (d.title || '').toLowerCase().includes(searchLower) ||
+      (d.project_name || '').toLowerCase().includes(searchLower)
+  })
+
+  const groups = {}
+  for (const doc of filtered) {
+    const key = getFileGroup(doc.title)
+    if (!groups[key]) groups[key] = []
+    groups[key].push(doc)
+  }
+  const groupKeys = Object.keys(groups).sort()
+
+  const handleNewProject = () => {
+    const name = newProjName.trim()
+    if (!name) return
+    onNewProject(name)
+    setNewProjName('')
+    setShowNewProj(false)
+  }
+
+  const handleRename = useCallback((docId, name, desc) => {
+    onRename(docId, name, desc)
+    if (selectedDoc?.id === docId) {
+      setSelectedDoc(prev => prev ? { ...prev, display_name: name || null, description: desc || null } : null)
+    }
+  }, [onRename, selectedDoc?.id])
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      {/* Project selector bar */}
+      <div style={{ padding: '8px 10px', borderBottom: `1px solid ${BORDER}`, background: PANEL2, flexShrink: 0 }}>
+        <div style={{ display: 'flex', gap: 5, marginBottom: 6, alignItems: 'center' }}>
+          <select
+            value={currentProject}
+            onChange={e => onSetProject(e.target.value)}
+            style={{
+              flex: 1, background: '#0d2035', border: '1px solid #1e3a5f',
+              color: TEXT, fontFamily: MONO, fontSize: 10, padding: '4px 6px',
+              borderRadius: 3, cursor: 'pointer', outline: 'none',
+            }}
+          >
+            <option value="__ALL__">All Projects ({docs.length})</option>
+            {projects.map(p => (
+              <option key={p} value={p}>
+                {p} ({docs.filter(d => (d.project_name ?? 'Default') === p).length})
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={() => setShowNewProj(v => !v)}
+            title="New project"
+            style={{
+              background: '#0d2035', border: '1px solid #1e3a5f',
+              color: ACCENT, fontFamily: MONO, fontSize: 14,
+              padding: '2px 8px', borderRadius: 3, cursor: 'pointer', lineHeight: 1,
+            }}
+          >+</button>
+        </div>
+
+        {showNewProj && (
+          <div style={{ display: 'flex', gap: 4, marginBottom: 6 }}>
+            <input
+              autoFocus
+              placeholder="Project name…"
+              value={newProjName}
+              onChange={e => setNewProjName(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') handleNewProject()
+                if (e.key === 'Escape') setShowNewProj(false)
+              }}
+              style={{
+                flex: 1, background: '#0d2035', border: '1px solid #1e3a5f',
+                color: TEXT, fontFamily: MONO, fontSize: 10,
+                padding: '4px 6px', borderRadius: 3, outline: 'none',
+              }}
+            />
+            <button
+              onClick={handleNewProject}
+              style={{
+                background: '#1d4ed8', border: 'none',
+                color: '#ffffff', fontFamily: MONO, fontSize: 10,
+                padding: '4px 8px', borderRadius: 3, cursor: 'pointer',
+              }}
+            >Create</button>
+          </div>
+        )}
+
+        <button
+          onClick={onReindexAll}
+          style={{
+            width: '100%', background: '#0d2035', border: '1px solid #1e3a5f',
+            color: '#94a3b8', fontFamily: MONO, fontSize: 9,
+            padding: '5px 8px', borderRadius: 3, cursor: 'pointer', letterSpacing: .5,
+          }}
+        >↺ RE-INDEX ALL</button>
+      </div>
+
+      {/* Search box */}
+      <div style={{ padding: '6px 10px', borderBottom: `1px solid ${BORDER}`, flexShrink: 0 }}>
+        <input
+          value={searchText}
+          onChange={e => setSearchText(e.target.value)}
+          placeholder="Search documents…"
+          style={{
+            width: '100%', background: '#0d2035', border: `1px solid ${searchText ? ACCENT + '60' : '#1e3a5f'}`,
+            color: TEXT, fontFamily: MONO, fontSize: 10,
+            padding: '4px 8px', borderRadius: 3, outline: 'none', boxSizing: 'border-box',
+          }}
+        />
+        {searchText && filtered.length === 0 && (
+          <div style={{ fontFamily: MONO, fontSize: 9, color: '#64748b', marginTop: 4 }}>
+            No results for "{searchText}"
+          </div>
+        )}
+      </div>
+
+      {/* File tree */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: '4px 0' }}>
+        {!searchText && filtered.length === 0 && <EmptyState text="No documents in this project." />}
+        {groupKeys.map(key => (
+          <FileTypeGroup
+            key={key}
+            label={key}
+            docs={groups[key]}
+            selectedId={selectedDoc?.id}
+            searchText={searchText}
+            onSelect={setSelectedDoc}
+            onDelete={docId => { onDelete(docId); if (selectedDoc?.id === docId) setSelectedDoc(null) }}
+            onRename={handleRename}
+          />
+        ))}
+      </div>
+
+      {/* Detail panel */}
+      {selectedDoc && (
+        <DocDetailPanel
+          key={selectedDoc.id}
+          doc={selectedDoc}
+          onClose={() => setSelectedDoc(null)}
+          onDelete={() => { onDelete(selectedDoc.id); setSelectedDoc(null) }}
+          onRename={handleRename}
+        />
+      )}
+    </div>
+  )
+}
+
+function FileTypeGroup({ label, docs, selectedId, searchText, onSelect, onDelete, onRename }) {
+  const [open, setOpen] = useState(true)
+  const color = getGroupColor(label)
+  return (
+    <div>
+      <div
+        onClick={() => setOpen(v => !v)}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 6,
+          padding: '4px 10px', cursor: 'pointer', background: '#051525',
+          borderBottom: `1px solid ${BORDER}`, userSelect: 'none',
+        }}
+      >
+        <span style={{ fontFamily: MONO, fontSize: 9, color, letterSpacing: .5, flex: 1 }}>
+          {open ? '▾' : '▸'} {label}
+        </span>
+        <span style={{ fontFamily: MONO, fontSize: 9, color: '#64748b' }}>{docs.length}</span>
+      </div>
+      {open && docs.map(doc => (
+        <DocTreeRow
+          key={doc.id}
+          doc={doc}
+          selected={doc.id === selectedId}
+          searchText={searchText}
+          onSelect={() => onSelect(doc)}
+          onDelete={() => onDelete(doc.id)}
+          onRename={onRename}
+        />
+      ))}
+    </div>
+  )
+}
+
+function DocTreeRow({ doc, selected, searchText, onSelect, onDelete, onRename }) {
+  const [hover,    setHover]    = useState(false)
+  const [editing,  setEditing]  = useState(false)
+  const [editName, setEditName] = useState('')
+  const [editDesc, setEditDesc] = useState('')
+
+  const color       = fileTypeBadgeColor(doc.file_type)
+  const displayName = doc.display_name || doc.title
+
+  const startEdit = e => {
+    e.stopPropagation()
+    setEditName(doc.display_name || '')
+    setEditDesc(doc.description || '')
+    setEditing(true)
+  }
+
+  const saveEdit = e => {
+    e?.stopPropagation()
+    onRename(doc.id, editName.trim(), editDesc.trim())
+    setEditing(false)
+  }
+
+  const cancelEdit = e => {
+    e?.stopPropagation()
+    setEditing(false)
+  }
+
+  return (
+    <div>
+      <div
+        onClick={editing ? undefined : onSelect}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        style={{
+          display: 'flex', alignItems: 'flex-start', gap: 6,
+          padding: '6px 10px 6px 20px',
+          background: selected ? '#0d3a5c' : hover ? '#0d2035' : 'transparent',
+          borderLeft: selected ? `3px solid ${ACCENT}` : `3px solid transparent`,
+          cursor: editing ? 'default' : 'pointer', transition: 'all .1s',
+        }}
+      >
+        <span style={{ width: 6, height: 6, borderRadius: 1, background: color, flexShrink: 0, marginTop: 3 }} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <span style={{
+              fontFamily: MONO, fontSize: 10, color: selected ? ACCENT : TEXT,
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1,
+            }}>
+              {highlightText(displayName, searchText)}
+            </span>
+            {(hover || selected) && !editing && (
+              <>
+                <button
+                  onClick={startEdit}
+                  title="Edit name/description"
+                  style={{ background: 'transparent', border: 'none', color: '#64748b', cursor: 'pointer', fontSize: 10, padding: '0 2px', flexShrink: 0 }}
+                >✏</button>
+                <button
+                  onClick={e => { e.stopPropagation(); onDelete() }}
+                  title="Remove"
+                  style={{ background: 'transparent', border: 'none', color: '#64748b', cursor: 'pointer', fontSize: 14, padding: '0 2px', flexShrink: 0 }}
+                >×</button>
+              </>
+            )}
+          </div>
+          {doc.display_name && (
+            <div style={{ fontFamily: MONO, fontSize: 8, color: '#64748b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {highlightText(doc.title, searchText)}
+            </div>
+          )}
+          {doc.description && (
+            <div style={{ fontFamily: SANS, fontSize: 9, color: TEXTM, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 1 }}>
+              {highlightText(
+                doc.description.length > 60 ? doc.description.slice(0, 60) + '…' : doc.description,
+                searchText
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {editing && (
+        <div
+          onClick={e => e.stopPropagation()}
+          style={{
+            padding: '6px 10px 8px 28px',
+            background: '#051525', borderLeft: `3px solid ${ACCENT}`,
+            borderBottom: `1px solid ${BORDER}`,
+          }}
+        >
+          <div style={{ fontFamily: MONO, fontSize: 8, color: '#64748b', marginBottom: 3 }}>DISPLAY NAME</div>
+          <input
+            autoFocus
+            value={editName}
+            onChange={e => setEditName(e.target.value)}
+            placeholder={doc.title}
+            onKeyDown={e => { if (e.key === 'Enter') saveEdit(e); if (e.key === 'Escape') cancelEdit(e) }}
+            style={{
+              width: '100%', background: '#0d2035', border: '1px solid #1e3a5f',
+              color: TEXT, fontFamily: MONO, fontSize: 10,
+              padding: '4px 6px', borderRadius: 3, outline: 'none',
+              marginBottom: 6, boxSizing: 'border-box',
+            }}
+          />
+          <div style={{ fontFamily: MONO, fontSize: 8, color: '#64748b', marginBottom: 3 }}>DESCRIPTION</div>
+          <input
+            value={editDesc}
+            onChange={e => setEditDesc(e.target.value)}
+            placeholder="Add a description…"
+            onKeyDown={e => { if (e.key === 'Escape') cancelEdit(e) }}
+            style={{
+              width: '100%', background: '#0d2035', border: '1px solid #1e3a5f',
+              color: TEXT, fontFamily: MONO, fontSize: 10,
+              padding: '4px 6px', borderRadius: 3, outline: 'none',
+              marginBottom: 6, boxSizing: 'border-box',
+            }}
+          />
+          <div style={{ display: 'flex', gap: 4 }}>
+            <button
+              onClick={saveEdit}
+              style={{ background: '#1d4ed8', border: 'none', color: '#ffffff', fontFamily: MONO, fontSize: 9, padding: '3px 10px', borderRadius: 3, cursor: 'pointer' }}
+            >Save</button>
+            <button
+              onClick={cancelEdit}
+              style={{ background: '#0d2035', border: '1px solid #1e3a5f', color: '#94a3b8', fontFamily: MONO, fontSize: 9, padding: '3px 10px', borderRadius: 3, cursor: 'pointer' }}
+            >Cancel</button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function DocDetailPanel({ doc, onClose, onDelete, onRename }) {
+  const [editingName, setEditingName] = useState(false)
+  const [editingDesc, setEditingDesc] = useState(false)
+  const [nameVal,     setNameVal]     = useState(doc.display_name || '')
+  const [descVal,     setDescVal]     = useState(doc.description  || '')
+  const [fields,      setFields]      = useState(null)
+
+  useEffect(() => {
+    window.engram?.getDocFields?.(doc.id)
+      .then(res => setFields(res?.ok ? res.fields ?? [] : []))
+      .catch(() => setFields([]))
+  }, [doc.id])
+
+  const saveName = () => {
+    onRename(doc.id, nameVal.trim(), descVal.trim())
+    setEditingName(false)
+  }
+
+  const saveDesc = () => {
+    onRename(doc.id, nameVal.trim(), descVal.trim())
+    setEditingDesc(false)
+  }
+
+  const color = fileTypeBadgeColor(doc.file_type)
+
+  return (
+    <div style={{ borderTop: `1px solid ${BORDER}`, background: '#030e1a', padding: '10px 12px', flexShrink: 0, maxHeight: 300, overflowY: 'auto' }}>
+      {/* Close */}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 4 }}>
+        <button onClick={onClose} style={{ background: 'transparent', border: 'none', color: TEXTM, cursor: 'pointer', fontSize: 14, padding: '0 2px' }}>×</button>
+      </div>
+
+      {/* Display name (editable) */}
+      <div style={{ marginBottom: 6 }}>
+        <div style={{ fontFamily: MONO, fontSize: 8, color: '#64748b', marginBottom: 2 }}>DISPLAY NAME</div>
+        {editingName ? (
+          <input
+            autoFocus
+            value={nameVal}
+            onChange={e => setNameVal(e.target.value)}
+            placeholder={doc.title}
+            onBlur={saveName}
+            onKeyDown={e => {
+              if (e.key === 'Enter') saveName()
+              if (e.key === 'Escape') { setNameVal(doc.display_name || ''); setEditingName(false) }
+            }}
+            style={{ width: '100%', background: '#0d2035', border: `1px solid ${ACCENT}`, color: TEXT, fontFamily: MONO, fontSize: 10, padding: '3px 6px', borderRadius: 3, outline: 'none', boxSizing: 'border-box' }}
+          />
+        ) : (
+          <div
+            onClick={() => setEditingName(true)}
+            title="Click to edit"
+            style={{ fontFamily: MONO, fontSize: 10, color: doc.display_name ? TEXT : '#334155', cursor: 'text', padding: '2px 4px', borderRadius: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+          >
+            {doc.display_name || 'Click to set display name…'}
+          </div>
+        )}
+      </div>
+
+      {/* Original filename */}
+      <div style={{ fontFamily: MONO, fontSize: 8, color: '#64748b', marginBottom: 8, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        Original: {doc.title}
+      </div>
+
+      {/* Description (editable) */}
+      <div style={{ marginBottom: 8 }}>
+        <div style={{ fontFamily: MONO, fontSize: 8, color: '#64748b', marginBottom: 2 }}>DESCRIPTION</div>
+        {editingDesc ? (
+          <textarea
+            autoFocus
+            value={descVal}
+            onChange={e => setDescVal(e.target.value)}
+            placeholder="Add a description…"
+            rows={2}
+            onBlur={saveDesc}
+            onKeyDown={e => { if (e.key === 'Escape') { setDescVal(doc.description || ''); setEditingDesc(false) } }}
+            style={{ width: '100%', background: '#0d2035', border: `1px solid ${ACCENT}`, color: TEXT, fontFamily: SANS, fontSize: 10, padding: '4px 6px', borderRadius: 3, outline: 'none', resize: 'none', boxSizing: 'border-box' }}
+          />
+        ) : (
+          <div
+            onClick={() => setEditingDesc(true)}
+            title="Click to edit"
+            style={{ fontFamily: SANS, fontSize: 10, color: doc.description ? '#94a3b8' : '#334155', cursor: 'text', padding: '2px 4px', borderRadius: 2, lineHeight: 1.4, minHeight: 20 }}
+          >
+            {doc.description || 'Click to add description…'}
+          </div>
+        )}
+      </div>
+
+      {/* Badges */}
+      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
+        <Badge bg={color + '25'} color={color}>{(doc.file_type ?? 'file').toUpperCase()}</Badge>
+        {doc.revision     && <Badge bg={BORDER2} color={TEXTM}>Rev {doc.revision}</Badge>}
+        {(doc.chunk_count ?? 0) > 0 && <Badge bg='#0c2a1a' color='#34d399'>{doc.chunk_count} chunks</Badge>}
+        {(doc.field_count ?? 0) > 0 && <Badge bg='#1a1a0a' color='#fbbf24'>{doc.field_count} fields</Badge>}
+        {doc.project_name && <span style={{ background: '#0d2035', color: '#38bdf8', border: '1px solid #1e3a5f', fontSize: 9, fontFamily: MONO, fontWeight: 700, padding: '2px 6px', borderRadius: 3, letterSpacing: .5, whiteSpace: 'nowrap', flexShrink: 0 }}>{doc.project_name}</span>}
+      </div>
+
+      {/* Indexed time */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 8 }}>
+        <span style={{ width: 6, height: 6, borderRadius: '50%', background: OK, display: 'inline-block' }} />
+        <span style={{ fontFamily: MONO, fontSize: 9, color: '#64748b' }}>indexed {relativeTime(doc.created_at)}</span>
+      </div>
+
+      {/* Sample extracted fields */}
+      {fields && fields.length > 0 && (
+        <div style={{ marginBottom: 8 }}>
+          <div style={{ fontFamily: MONO, fontSize: 8, color: '#64748b', marginBottom: 4, letterSpacing: .5 }}>EXTRACTED FIELDS</div>
+          {fields.slice(0, 5).map((f, i) => (
+            <div key={i} style={{ display: 'flex', gap: 6, marginBottom: 2 }}>
+              <span style={{ fontFamily: MONO, fontSize: 9, color: '#94a3b8', flexShrink: 0, width: 80, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {f.field_name}
+              </span>
+              <span style={{ fontFamily: MONO, fontSize: 9, color: TEXT, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {f.field_value}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <button
+        onClick={onDelete}
+        style={{ width: '100%', background: '#7f1d1d', border: '1px solid #991b1b', color: '#f87171', fontFamily: MONO, fontSize: 9, padding: '5px 8px', borderRadius: 3, cursor: 'pointer', letterSpacing: .5 }}
+      >× REMOVE FROM INDEX</button>
     </div>
   )
 }
@@ -1146,9 +2384,13 @@ export default function App() {
   const [tags,          setTags]          = useState([])
   const [docs,          setDocs]          = useState([])
   const [issues,        setIssues]        = useState([])
-  const [activeTab,     setActiveTab]     = useState('DOCUMENTS')
+  const [activeTab,     setActiveTab]     = useState('DOCS')
   const [inputText,     setInputText]     = useState('')
   const [engineerName,  setEngineerName]  = useState('')
+  const [allDocs,       setAllDocs]       = useState([])
+  const [projects,      setProjects]      = useState(['Default'])
+  const [currentProject, setCurrentProject] = useState('Default')
+  const [standards,     setStandards]     = useState([])
 
   // ── Check if workspace is initialised ────────────────────────────────────
   useEffect(() => {
@@ -1161,16 +2403,60 @@ export default function App() {
   }, [])
 
   // ── Load tags on mount ───────────────────────────────────────────────────
+  const loadTags = useCallback(() => {
+    window.engram?.listTags?.()
+      .then(data => {
+        const arr = Array.isArray(data) ? data : (data?.ok ? data.tags ?? [] : [])
+        setTags(arr)
+      })
+      .catch(err => console.error('[App] listTags:', err))
+  }, [])
+
+  // ── Load standards ───────────────────────────────────────────────────────
+  const loadStandards = useCallback(() => {
+    window.engram?.listStandards?.()
+      .then(res => { if (res?.ok) setStandards(res.standards ?? []) })
+      .catch(() => {})
+  }, [])
+
   useEffect(() => {
     if (!setupDone) return
-    window.engram?.getTags?.()
-      .then(data => setTags(Array.isArray(data) ? data : []))
-      .catch(err => console.error('[App] getTags:', err))
-
+    loadTags()
+    loadStandards()
     window.engram?.getWorkspaceConfig?.()
       .then(cfg => { if (cfg?.engineer_name) setEngineerName(cfg.engineer_name) })
       .catch(() => {})
-  }, [setupDone])
+  }, [setupDone, loadTags, loadStandards])
+
+  // ── Load all workspace docs + projects (for DOCS tab) ────────────────────
+  const loadAllDocs = useCallback(() => {
+    window.engram?.listDocs?.()
+      .then(res => { if (res?.ok) setAllDocs(res.docs ?? []) })
+      .catch(() => {})
+    window.engram?.listProjects?.()
+      .then(res => { if (res?.ok) setProjects(res.projects ?? ['Default']) })
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    if (!setupDone) return
+    loadAllDocs()
+    window.engram?.getCurrentProject?.()
+      .then(name => { if (name) setCurrentProject(name) })
+      .catch(() => {})
+    const id = setInterval(loadAllDocs, 10_000)
+    return () => clearInterval(id)
+  }, [setupDone, loadAllDocs])
+
+  // ── Listen for index progress events ─────────────────────────────────────
+  useEffect(() => {
+    window.engram?.onIndexProgress?.((data) => {
+      if (data.status === 'done' || data.status === 'failed') {
+        loadAllDocs()
+        loadTags()
+      }
+    })
+  }, [loadAllDocs, loadTags])
 
   // ── Load docs + issues when tag changes ──────────────────────────────────
   useEffect(() => {
@@ -1184,7 +2470,7 @@ export default function App() {
       setIssues(issuesRes.status === 'fulfilled' ? (issuesRes.value ?? []) : [])
     })
 
-    setActiveTab('DOCUMENTS')
+    setActiveTab('DOCS')
   }, [activeTag?.id])
 
   // ── Derived stats ────────────────────────────────────────────────────────
@@ -1274,8 +2560,62 @@ export default function App() {
       }
     } catch (err) {
       console.error("Add documents error:", err)
+    } finally {
+      loadAllDocs()
     }
+  }, [activeTag, loadAllDocs])
+
+  const handleDeleteDoc = useCallback(async (docId) => {
+    await window.engram?.deleteDoc?.(docId).catch(console.error)
+    loadAllDocs()
+  }, [loadAllDocs])
+
+  const handleRenameDoc = useCallback(async (docId, displayName, description) => {
+    await window.engram?.renameDoc?.(docId, displayName, description).catch(console.error)
+    setAllDocs(prev => prev.map(d =>
+      d.id === docId ? { ...d, display_name: displayName || null, description: description || null } : d
+    ))
+  }, [])
+
+  const handleSetProject = useCallback((name) => {
+    setCurrentProject(name)
+    window.engram?.setCurrentProject?.(name).catch(console.error)
+  }, [])
+
+  const handleNewProject = useCallback((name) => {
+    window.engram?.createProject?.(name)
+      .then(() => {
+        setProjects(prev => [...new Set([...prev, name])].sort(
+          (a, b) => a === 'Default' ? -1 : b === 'Default' ? 1 : a.localeCompare(b)
+        ))
+        setCurrentProject(name)
+        window.engram?.setCurrentProject?.(name).catch(console.error)
+      })
+      .catch(console.error)
+  }, [])
+
+  const handleCreateTag = useCallback(async (data) => {
+    await window.engram?.createTag?.(data).catch(console.error)
+    loadTags()
+  }, [loadTags])
+
+  const handleUpdateTag = useCallback(async (data) => {
+    await window.engram?.updateTag?.(data).catch(console.error)
+    setTags(prev => prev.map(t =>
+      (t.tag_id || t.name) === data.tag_id ? { ...t, ...data } : t
+    ))
+  }, [])
+
+  const handleDeleteTag = useCallback(async (tagId) => {
+    await window.engram?.deleteTag?.(tagId).catch(console.error)
+    setTags(prev => prev.filter(t => (t.tag_id || t.name) !== tagId))
+    if ((activeTag?.tag_id || activeTag?.name) === tagId) setActiveTag(null)
   }, [activeTag])
+
+  const handleCopyTag = useCallback(async (tagId, newId) => {
+    await window.engram?.copyTag?.(tagId, newId).catch(console.error)
+    loadTags()
+  }, [loadTags])
 
   const handleReindex = useCallback(() => {
     window.engram?.reindex?.().catch(console.error)
@@ -1299,9 +2639,7 @@ export default function App() {
         <style>{STYLE_TAG}</style>
         <SetupWizard onComplete={() => {
           setSetupDone(true)
-          window.engram?.getTags?.()
-            .then(data => setTags(Array.isArray(data) ? data : []))
-            .catch(() => {})
+          loadTags()
         }} />
       </>
     )
@@ -1329,6 +2667,10 @@ export default function App() {
             tags={tags}
             activeTag={activeTag}
             onSelectTag={tag => setActiveTag(tag)}
+            onCreateTag={handleCreateTag}
+            onUpdateTag={handleUpdateTag}
+            onDeleteTag={handleDeleteTag}
+            onCopyTag={handleCopyTag}
             onAddDocs={handleAddDocs}
             onReindex={handleReindex}
           />
@@ -1347,11 +2689,20 @@ export default function App() {
 
           <RightPanel
             activeTag={activeTag}
-            docs={docs}
+            allDocs={allDocs}
+            projects={projects}
+            currentProject={currentProject}
             issues={issues}
             activeTab={activeTab}
             onTabChange={setActiveTab}
             onClassifyIssue={handleClassifyIssue}
+            onDeleteDoc={handleDeleteDoc}
+            onReindexAll={handleReindex}
+            onSetProject={handleSetProject}
+            onNewProject={handleNewProject}
+            onRenameDoc={handleRenameDoc}
+            standards={standards}
+            onStandardsRefresh={loadStandards}
           />
         </div>
       </div>
