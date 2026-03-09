@@ -1,5 +1,25 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 
+// ── Web API helper ─────────────────────────────────────────────────────────────
+// Replaces window.engram.* (Electron IPC) with fetch() calls to the Express
+// server.  TOKEN is read from localStorage so each browser session can carry
+// its own credential without a login page.
+
+const TOKEN = localStorage.getItem('engram_token') || ''
+
+async function api(method, path, body) {
+  const opts = {
+    method,
+    headers: {
+      'Content-Type':   'application/json',
+      'x-engram-token': TOKEN,
+    },
+  }
+  if (body !== undefined) opts.body = JSON.stringify(body)
+  const res = await fetch(path, opts)
+  return res.json()
+}
+
 // ── Design tokens ─────────────────────────────────────────────────────────────
 const BG       = '#020810'
 const PANEL    = '#030e1a'
@@ -205,11 +225,11 @@ function TopBar({ engineerName, totalDocs, totalIssues, totalErrors }) {
   const [savedMsg, setSavedMsg] = useState(false)
 
   const handleEditConfig = () => {
-    window.engram?.openConfigFile?.().catch(console.error)
+    // No-op in web mode — config is managed server-side via workspace API
   }
 
   const handleSaveConfig = async () => {
-    await window.engram?.saveConfigFile?.().catch(console.error)
+    await api('POST', '/api/workspace/saveConfig').catch(console.error)
     setSavedMsg(true)
     setTimeout(() => setSavedMsg(false), 2000)
   }
@@ -307,7 +327,7 @@ function LeftPanel({ tags, activeTag, onSelectTag, onCreateTag, onUpdateTag, onD
   const handleCleanup = async () => {
     setCleanupMsg('Scanning…')
     try {
-      const res = await window.engram?.cleanupIndex?.()
+      const res = await api('POST', '/api/index/cleanup')
       if (res?.ok) {
         setCleanupMsg(res.cleaned > 0 ? `Cleaned ${res.cleaned} orphan${res.cleaned !== 1 ? 's' : ''}` : 'No orphans found')
       } else {
@@ -1003,14 +1023,17 @@ const TABS = ['DOCS', 'ISSUES', 'WIRING', 'HISTORY', 'STANDARDS']
 const STD_PURPLE = '#a855f7'
 const STD_PURPLED = '#3b0764'
 
-function StandardsTab({ standards, onDelete, onAdd, onAddFolder }) {
-  const [addPath,    setAddPath]    = useState('')
-  const [addTitle,   setAddTitle]   = useState('')
-  const [addCat,     setAddCat]     = useState('General')
-  const [addYear,    setAddYear]    = useState('')
-  const [addForm,    setAddForm]    = useState(false)
-  const [busy,       setBusy]       = useState(false)
-  const [err,        setErr]        = useState('')
+function StandardsTab({ standards, onDelete, onAdd }) {
+  const [addFile,       setAddFile]       = useState(null)   // File object from browser picker
+  const [addTitle,      setAddTitle]      = useState('')
+  const [addCat,        setAddCat]        = useState('General')
+  const [addYear,       setAddYear]       = useState('')
+  const [addForm,       setAddForm]       = useState(false)
+  const [folderForm,    setFolderForm]    = useState(false)
+  const [folderPath,    setFolderPath]    = useState('')      // server-side path
+  const [busy,          setBusy]          = useState(false)
+  const [err,           setErr]           = useState('')
+  const fileInputRef = useRef(null)
 
   // Group by category
   const byCategory = {}
@@ -1021,16 +1044,21 @@ function StandardsTab({ standards, onDelete, onAdd, onAddFolder }) {
   }
 
   async function handleAdd() {
-    if (!addPath.trim()) return
+    if (!addFile) return
     setBusy(true); setErr('')
     try {
-      const res = await window.engram?.addStandard?.(addPath.trim(), {
-        title:    addTitle.trim() || null,
-        category: addCat.trim()  || 'General',
-        year:     addYear.trim() || null,
-      })
+      const formData = new FormData()
+      formData.append('file', addFile)
+      if (addTitle.trim()) formData.append('title',    addTitle.trim())
+      formData.append('category', addCat.trim() || 'General')
+      if (addYear.trim())  formData.append('year',     addYear.trim())
+      const res = await fetch('/api/standards/add', {
+        method: 'POST',
+        headers: { 'x-engram-token': TOKEN },
+        body: formData,
+      }).then(r => r.json())
       if (res?.ok) {
-        setAddForm(false); setAddPath(''); setAddTitle(''); setAddYear('')
+        setAddForm(false); setAddFile(null); setAddTitle(''); setAddYear('')
         onAdd?.()
       } else {
         setErr(res?.error ?? 'Failed')
@@ -1040,12 +1068,14 @@ function StandardsTab({ standards, onDelete, onAdd, onAddFolder }) {
   }
 
   async function handleAddFolder() {
-    const path = await window.engram?.openFolder?.()
-    if (!path) return
+    if (!folderPath.trim()) return
     setBusy(true); setErr('')
     try {
-      const res = await window.engram?.addStandardsFolder?.(path, { category: addCat.trim() || 'General' })
-      if (res?.ok) onAdd?.()
+      const res = await api('POST', '/api/standards/addFolder', {
+        folderPath: folderPath.trim(),
+        category:  addCat.trim() || 'General',
+      })
+      if (res?.ok) { setFolderForm(false); setFolderPath(''); onAdd?.() }
       else setErr(res?.error ?? 'Failed')
     } catch (e) { setErr(e.message) }
     setBusy(false)
@@ -1062,12 +1092,13 @@ function StandardsTab({ standards, onDelete, onAdd, onAddFolder }) {
           STANDARDS & POLICY
         </span>
         <div style={{ display: 'flex', gap: 6 }}>
-          <button onClick={handleAddFolder} disabled={busy} style={{
-            background: STD_PURPLED, border: `1px solid ${STD_PURPLE}40`,
+          <button onClick={() => { setFolderForm(f => !f); setAddForm(false) }} disabled={busy} style={{
+            background: folderForm ? STD_PURPLED : 'transparent',
+            border: `1px solid ${STD_PURPLE}40`,
             color: STD_PURPLE, fontFamily: MONO, fontSize: 8, padding: '3px 8px',
             borderRadius: 3, cursor: 'pointer',
           }}>+ FOLDER</button>
-          <button onClick={() => setAddForm(f => !f)} style={{
+          <button onClick={() => { setAddForm(f => !f); setFolderForm(false) }} style={{
             background: addForm ? STD_PURPLED : 'transparent',
             border: `1px solid ${STD_PURPLE}40`,
             color: STD_PURPLE, fontFamily: MONO, fontSize: 8, padding: '3px 8px',
@@ -1076,21 +1107,63 @@ function StandardsTab({ standards, onDelete, onAdd, onAddFolder }) {
         </div>
       </div>
 
+      {/* Hidden file input — triggered by "Choose File" button below */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".pdf,.docx,.doc,.xlsx,.xls,.txt"
+        style={{ display: 'none' }}
+        onChange={e => { setAddFile(e.target.files[0] ?? null); setAddForm(true) }}
+      />
+
+      {/* Folder path form — user types a server-side folder path */}
+      {folderForm && (
+        <div style={{
+          padding: '10px 12px', borderBottom: `1px solid ${BORDER}`,
+          background: '#0d0620', display: 'flex', flexDirection: 'column', gap: 6, flexShrink: 0,
+        }}>
+          <input
+            placeholder="Server folder path (e.g. C:\standards)"
+            value={folderPath}
+            onChange={e => setFolderPath(e.target.value)}
+            style={{
+              background: BORDER2, border: `1px solid ${STD_PURPLE}30`, color: TEXT,
+              fontFamily: MONO, fontSize: 9, padding: '4px 8px', borderRadius: 3, outline: 'none',
+            }}
+          />
+          <input
+            placeholder="Category"
+            value={addCat}
+            onChange={e => setAddCat(e.target.value)}
+            style={{
+              background: BORDER2, border: `1px solid ${STD_PURPLE}30`, color: TEXT,
+              fontFamily: MONO, fontSize: 9, padding: '4px 8px', borderRadius: 3, outline: 'none',
+            }}
+          />
+          {err && <div style={{ fontFamily: MONO, fontSize: 9, color: ERR }}>{err}</div>}
+          <button onClick={handleAddFolder} disabled={busy || !folderPath.trim()} style={{
+            background: STD_PURPLE, border: 'none', color: '#fff',
+            fontFamily: MONO, fontSize: 9, padding: '5px', borderRadius: 3, cursor: 'pointer',
+          }}>{busy ? 'Adding…' : 'Index Folder'}</button>
+        </div>
+      )}
+
       {/* Add file form */}
       {addForm && (
         <div style={{
           padding: '10px 12px', borderBottom: `1px solid ${BORDER}`,
           background: '#0d0620', display: 'flex', flexDirection: 'column', gap: 6, flexShrink: 0,
         }}>
-          <input
-            placeholder="File path..."
-            value={addPath}
-            onChange={e => setAddPath(e.target.value)}
+          <button
+            onClick={() => fileInputRef.current?.click()}
             style={{
-              background: BORDER2, border: `1px solid ${STD_PURPLE}30`, color: TEXT,
-              fontFamily: MONO, fontSize: 9, padding: '4px 8px', borderRadius: 3, outline: 'none',
+              background: BORDER2, border: `1px solid ${STD_PURPLE}30`, color: addFile ? TEXT : TEXTM,
+              fontFamily: MONO, fontSize: 9, padding: '4px 8px', borderRadius: 3,
+              cursor: 'pointer', textAlign: 'left',
             }}
-          />
+          >
+            {addFile ? addFile.name : 'Choose file…'}
+          </button>
           <input
             placeholder="Title (optional)"
             value={addTitle}
@@ -1121,7 +1194,7 @@ function StandardsTab({ standards, onDelete, onAdd, onAddFolder }) {
             />
           </div>
           {err && <div style={{ fontFamily: MONO, fontSize: 9, color: ERR }}>{err}</div>}
-          <button onClick={handleAdd} disabled={busy} style={{
+          <button onClick={handleAdd} disabled={busy || !addFile} style={{
             background: STD_PURPLE, border: 'none', color: '#fff',
             fontFamily: MONO, fontSize: 9, padding: '5px', borderRadius: 3, cursor: 'pointer',
           }}>{busy ? 'Adding…' : 'Add Standard'}</button>
@@ -1208,7 +1281,7 @@ function RegistryNotepad() {
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
-    window.engram?.listRegistry?.()
+    api('GET', '/api/registry/list')
       .then(res => {
         if (res?.ok) {
           const items = res.standards ?? []
@@ -1236,7 +1309,7 @@ function RegistryNotepad() {
   async function handleSave() {
     setSaving(true)
     try {
-      await window.engram?.saveRegistry?.(rows)
+      await api('POST', '/api/registry/save', rows)
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
     } catch (_) {}
@@ -1390,7 +1463,7 @@ function RightPanel({ activeTag, allDocs, projects, currentProject, issues, acti
         {activeTab === 'STANDARDS' ? (
           <StandardsTab
             standards={standards}
-            onDelete={async (id) => { await window.engram?.deleteStandard?.(id); onStandardsRefresh?.() }}
+            onDelete={async (id) => { await api('POST', '/api/standards/delete', { stdId: id }); onStandardsRefresh?.() }}
             onAdd={onStandardsRefresh}
           />
         ) : activeTab === 'DOCS' ? (
@@ -1800,7 +1873,7 @@ function DocDetailPanel({ doc, onClose, onDelete, onRename }) {
   const [fields,      setFields]      = useState(null)
 
   useEffect(() => {
-    window.engram?.getDocFields?.(doc.id)
+    api('GET', `/api/docs/fields/${doc.id}`)
       .then(res => setFields(res?.ok ? res.fields ?? [] : []))
       .catch(() => setFields([]))
   }, [doc.id])
@@ -2030,8 +2103,8 @@ function WiringTab({ tagId }) {
   const [wiring, setWiring] = useState(null)
   useEffect(() => {
     if (!tagId) return
-    window.engram?.getWiring?.(tagId)
-      .then(d => setWiring(d ?? []))
+    api('POST', '/api/wiring/get', { tagId })
+      .then(d => setWiring(Array.isArray(d) ? d : []))
       .catch(() => setWiring([]))
   }, [tagId])
 
@@ -2065,8 +2138,8 @@ function HistoryTab({ tagId }) {
   const [history, setHistory] = useState(null)
   useEffect(() => {
     if (!tagId) return
-    window.engram?.getHistory?.(tagId)
-      .then(d => setHistory(d ?? []))
+    api('GET', '/api/git/history')
+      .then(d => setHistory(Array.isArray(d) ? d : []))
       .catch(() => setHistory([]))
   }, [tagId])
 
@@ -2154,9 +2227,11 @@ function SetupWizard({ onComplete }) {
   const [submitting,    setSubmitting]    = useState(false)
   const [error,         setError]         = useState('')
 
-  const addFolder = async () => {
-    const folder = await window.engram?.openFolder?.()
-    if (folder) setSourcePaths(p => [...p, folder])
+  const [folderInput, setFolderInput] = useState('')
+
+  const addFolder = () => {
+    const f = folderInput.trim()
+    if (f) { setSourcePaths(p => [...p, f]); setFolderInput('') }
   }
 
   const removeFolder = idx =>
@@ -2168,7 +2243,7 @@ function SetupWizard({ onComplete }) {
     setError('')
     setSubmitting(true)
     try {
-      await window.engram?.setupWorkspace?.({
+      await api('POST', '/api/workspace/setup', {
         engineer_name:  engineerName.trim(),
         engineer_email: engineerEmail.trim() || 'engram@local',
         plant_name:     plantName.trim(),
@@ -2288,17 +2363,29 @@ function SetupWizard({ onComplete }) {
                   </div>
                 ))}
               </div>
-              <button
-                onClick={addFolder}
-                style={{
-                  background: BORDER, border: `1px solid ${BORDER2}`,
-                  color: TEXTM, fontFamily: MONO, fontSize: 10,
-                  padding: '8px 14px', borderRadius: 4, cursor: 'pointer',
-                  textAlign: 'left',
-                }}
-              >
-                + Add Folder
-              </button>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <input
+                  value={folderInput}
+                  onChange={e => setFolderInput(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && addFolder()}
+                  placeholder="Server folder path…"
+                  style={{
+                    flex: 1, background: PANEL2, border: `1px solid ${BORDER2}`,
+                    borderRadius: 4, padding: '8px 10px',
+                    color: TEXT, fontFamily: MONO, fontSize: 10, outline: 'none',
+                  }}
+                />
+                <button
+                  onClick={addFolder}
+                  style={{
+                    background: BORDER, border: `1px solid ${BORDER2}`,
+                    color: TEXTM, fontFamily: MONO, fontSize: 10,
+                    padding: '8px 14px', borderRadius: 4, cursor: 'pointer',
+                  }}
+                >
+                  + Add
+                </button>
+              </div>
             </div>
           )}
 
@@ -2394,7 +2481,7 @@ export default function App() {
 
   // ── Check if workspace is initialised ────────────────────────────────────
   useEffect(() => {
-    window.engram?.getWorkspaceConfig?.()
+    api('GET', '/api/workspace/config')
       .then(cfg => {
         setSetupDone(cfg?.workspace_initialised === '1')
         if (cfg?.engineer_name) setEngineerName(cfg.engineer_name)
@@ -2404,7 +2491,7 @@ export default function App() {
 
   // ── Load tags on mount ───────────────────────────────────────────────────
   const loadTags = useCallback(() => {
-    window.engram?.listTags?.()
+    api('GET', '/api/tags/list')
       .then(data => {
         const arr = Array.isArray(data) ? data : (data?.ok ? data.tags ?? [] : [])
         setTags(arr)
@@ -2414,7 +2501,7 @@ export default function App() {
 
   // ── Load standards ───────────────────────────────────────────────────────
   const loadStandards = useCallback(() => {
-    window.engram?.listStandards?.()
+    api('GET', '/api/standards/list')
       .then(res => { if (res?.ok) setStandards(res.standards ?? []) })
       .catch(() => {})
   }, [])
@@ -2423,17 +2510,17 @@ export default function App() {
     if (!setupDone) return
     loadTags()
     loadStandards()
-    window.engram?.getWorkspaceConfig?.()
+    api('GET', '/api/workspace/config')
       .then(cfg => { if (cfg?.engineer_name) setEngineerName(cfg.engineer_name) })
       .catch(() => {})
   }, [setupDone, loadTags, loadStandards])
 
   // ── Load all workspace docs + projects (for DOCS tab) ────────────────────
   const loadAllDocs = useCallback(() => {
-    window.engram?.listDocs?.()
+    api('GET', '/api/docs/list')
       .then(res => { if (res?.ok) setAllDocs(res.docs ?? []) })
       .catch(() => {})
-    window.engram?.listProjects?.()
+    api('GET', '/api/projects/list')
       .then(res => { if (res?.ok) setProjects(res.projects ?? ['Default']) })
       .catch(() => {})
   }, [])
@@ -2441,30 +2528,23 @@ export default function App() {
   useEffect(() => {
     if (!setupDone) return
     loadAllDocs()
-    window.engram?.getCurrentProject?.()
+    api('GET', '/api/projects/getCurrent')
       .then(name => { if (name) setCurrentProject(name) })
       .catch(() => {})
     const id = setInterval(loadAllDocs, 10_000)
     return () => clearInterval(id)
   }, [setupDone, loadAllDocs])
 
-  // ── Listen for index progress events ─────────────────────────────────────
-  useEffect(() => {
-    window.engram?.onIndexProgress?.((data) => {
-      if (data.status === 'done' || data.status === 'failed') {
-        loadAllDocs()
-        loadTags()
-      }
-    })
-  }, [loadAllDocs, loadTags])
+  // ── Index progress: rely on setInterval polling (no push events in web mode)
+  // loadAllDocs already runs every 10 s in the effect above; no extra listener needed.
 
   // ── Load docs + issues when tag changes ──────────────────────────────────
   useEffect(() => {
     if (!activeTag) { setDocs([]); setIssues([]); return }
 
     Promise.allSettled([
-      window.engram?.getDocs?.(activeTag.id),
-      window.engram?.getIssues?.(activeTag.id),
+      api('POST', '/api/docs/get',   { tagId: activeTag.id }),
+      api('POST', '/api/issues/get', { tagId: activeTag.id }),
     ]).then(([docsRes, issuesRes]) => {
       setDocs(docsRes.status === 'fulfilled' ? (docsRes.value ?? []) : [])
       setIssues(issuesRes.status === 'fulfilled' ? (issuesRes.value ?? []) : [])
@@ -2489,7 +2569,7 @@ export default function App() {
 
     try {
       const prefix = activeTag ? `[Tag: ${activeTag.name}] ` : ''
-      const resp   = await window.engram?.query?.(prefix + text)
+      const resp   = await api('POST', '/api/query/send', { message: prefix + text })
       setMessages(prev => [...prev, {
         role: 'assistant',
         text: resp ?? 'No response received.',
@@ -2512,7 +2592,7 @@ export default function App() {
 
   // ── Diff actions ─────────────────────────────────────────────────────────
   const handleAcceptDiff = useCallback(diff => {
-    window.engram?.stageChange?.(activeTag?.id, diff.field, diff.oldVal, diff.newVal)
+    api('POST', '/api/stage/change', { tagId: activeTag?.id, field: diff.field, oldVal: diff.oldVal, newVal: diff.newVal })
       .catch(console.error)
     setMessages(prev => [...prev, {
       role: 'assistant',
@@ -2531,47 +2611,46 @@ export default function App() {
 
   // ── Issue classification ──────────────────────────────────────────────────
   const handleClassifyIssue = useCallback((issueId, classification, comment) => {
-    window.engram?.classifyIssue?.(issueId, classification, comment)
+    api('POST', '/api/issues/update', { id: issueId, classification, comment })
       .catch(console.error)
   }, [])
 
   // ── Workspace actions ────────────────────────────────────────────────────
-  const handleAddDocs = useCallback(async () => {
-    console.log("Add Documents clicked")
-    console.log("window.engram:", window.engram)
-    console.log("openFiles:", window.engram?.openFiles)
+  const docFileInputRef = useRef(null)
+
+  // Trigger the hidden file input — the actual upload happens in handleDocFileChange
+  const handleAddDocs = useCallback(() => {
+    docFileInputRef.current?.click()
+  }, [])
+
+  const handleDocFileChange = useCallback(async (e) => {
+    const files = Array.from(e.target.files ?? [])
+    if (!files.length) return
+    e.target.value = '' // reset so the same file can be re-selected
+
+    const formData = new FormData()
+    files.forEach(f => formData.append('files', f))
+    if (activeTag?.id) formData.append('tagId', String(activeTag.id))
 
     try {
-      const files = await window.engram.openFiles()
-      console.log("Files returned:", files)
-
-      if (!files || files.length === 0) {
-        console.log("No files selected")
-        return
-      }
-
-      for (const filePath of files) {
-        console.log("Adding file:", filePath)
-        const result = await window.engram.addDoc({
-          filePath,
-          tagId: activeTag?.id
-        })
-        console.log("Add result:", result)
-      }
+      await fetch('/api/docs/add', {
+        method: 'POST',
+        headers: { 'x-engram-token': TOKEN },
+        body: formData,
+      })
     } catch (err) {
-      console.error("Add documents error:", err)
-    } finally {
-      loadAllDocs()
+      console.error('Add documents error:', err)
     }
+    loadAllDocs()
   }, [activeTag, loadAllDocs])
 
   const handleDeleteDoc = useCallback(async (docId) => {
-    await window.engram?.deleteDoc?.(docId).catch(console.error)
+    await api('POST', '/api/docs/delete', { docId }).catch(console.error)
     loadAllDocs()
   }, [loadAllDocs])
 
   const handleRenameDoc = useCallback(async (docId, displayName, description) => {
-    await window.engram?.renameDoc?.(docId, displayName, description).catch(console.error)
+    await api('POST', '/api/docs/rename', { docId, displayName, description }).catch(console.error)
     setAllDocs(prev => prev.map(d =>
       d.id === docId ? { ...d, display_name: displayName || null, description: description || null } : d
     ))
@@ -2579,46 +2658,46 @@ export default function App() {
 
   const handleSetProject = useCallback((name) => {
     setCurrentProject(name)
-    window.engram?.setCurrentProject?.(name).catch(console.error)
+    api('POST', '/api/projects/setCurrent', { name }).catch(console.error)
   }, [])
 
   const handleNewProject = useCallback((name) => {
-    window.engram?.createProject?.(name)
+    api('POST', '/api/projects/create', { name })
       .then(() => {
         setProjects(prev => [...new Set([...prev, name])].sort(
           (a, b) => a === 'Default' ? -1 : b === 'Default' ? 1 : a.localeCompare(b)
         ))
         setCurrentProject(name)
-        window.engram?.setCurrentProject?.(name).catch(console.error)
+        api('POST', '/api/projects/setCurrent', { name }).catch(console.error)
       })
       .catch(console.error)
   }, [])
 
   const handleCreateTag = useCallback(async (data) => {
-    await window.engram?.createTag?.(data).catch(console.error)
+    await api('POST', '/api/tags/create', data).catch(console.error)
     loadTags()
   }, [loadTags])
 
   const handleUpdateTag = useCallback(async (data) => {
-    await window.engram?.updateTag?.(data).catch(console.error)
+    await api('POST', '/api/tags/update', data).catch(console.error)
     setTags(prev => prev.map(t =>
       (t.tag_id || t.name) === data.tag_id ? { ...t, ...data } : t
     ))
   }, [])
 
   const handleDeleteTag = useCallback(async (tagId) => {
-    await window.engram?.deleteTag?.(tagId).catch(console.error)
+    await api('POST', '/api/tags/delete', { tagId }).catch(console.error)
     setTags(prev => prev.filter(t => (t.tag_id || t.name) !== tagId))
     if ((activeTag?.tag_id || activeTag?.name) === tagId) setActiveTag(null)
   }, [activeTag])
 
   const handleCopyTag = useCallback(async (tagId, newId) => {
-    await window.engram?.copyTag?.(tagId, newId).catch(console.error)
+    await api('POST', '/api/tags/copy', { tagId, newTagId: newId }).catch(console.error)
     loadTags()
   }, [loadTags])
 
   const handleReindex = useCallback(() => {
-    window.engram?.reindex?.().catch(console.error)
+    api('POST', '/api/index/reindexAll').catch(console.error)
     setMessages(prev => [...prev, {
       role: 'assistant',
       text: 'Re-index job queued. Documents will be re-processed in the background.',
@@ -2648,6 +2727,16 @@ export default function App() {
   return (
     <>
       <style>{STYLE_TAG}</style>
+
+      {/* Hidden file input for document uploads — triggered by handleAddDocs */}
+      <input
+        ref={docFileInputRef}
+        type="file"
+        multiple
+        accept=".pdf,.docx,.doc,.xlsx,.xls,.txt"
+        style={{ display: 'none' }}
+        onChange={handleDocFileChange}
+      />
 
       <div style={{
         display: 'flex', flexDirection: 'column',

@@ -4,13 +4,21 @@
   "description": "Plant Document Integrity System",
   "main": "src/main/index.cjs",
   "scripts": {
-    "dev": "concurrently \"node node_modules/vite/bin/vite.js\" \"node node_modules/wait-on/bin/wait-on http://localhost:5173 && node_modules\\electron\\dist\\electron.exe .\""
+    "dev": "concurrently \"node node_modules/vite/bin/vite.js\" \"node node_modules/wait-on/bin/wait-on http://localhost:5173 && node_modules\\electron\\dist\\electron.exe .\"",
+    "dev:web": "concurrently \"node node_modules/vite/bin/vite.js\" \"node src/server/index.js\"",
+    "start": "node src/server/index.js",
+    "start:prod": "PORT=3000 node src/server/index.js",
+    "start:sandbox": "PORT=3001 node src/server/index.js",
+    "build": "vite build"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",
     "@modelcontextprotocol/sdk": "^1.27.1",
+    "cors": "^2.8.6",
+    "express": "^4.22.1",
     "isomorphic-git": "^1.37.2",
     "mammoth": "^1.11.0",
+    "multer": "^1.4.5-lts.1",
     "pdf-parse": "^1.1.1",
     "pdfkit": "^0.17.2",
     "react": "^19.2.4",
@@ -22,9 +30,16 @@
   "build": {
     "appId": "com.engram.app",
     "productName": "ENGRAM",
-    "directories": { "output": "dist" },
-    "win": { "target": "nsis" },
-    "files": ["src/**/*", "assets/**/*"]
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*"
+    ]
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^5.1.4",
