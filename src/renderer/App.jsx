@@ -20,6 +20,16 @@ async function api(method, path, body) {
   return res.json()
 }
 
+// ── Null-safe string coercion ──────────────────────────────────────────────────
+// Use safeStr() anywhere a value from the database (doc.title, tag.description,
+// etc.) needs to be used as a string.  Prevents "Cannot read properties of null
+// (reading 'replace')" crashes when optional DB columns are NULL.
+
+function safeStr(val) {
+  if (val === null || val === undefined) return ''
+  return String(val)
+}
+
 // ── Design tokens ─────────────────────────────────────────────────────────────
 const BG       = '#020810'
 const PANEL    = '#030e1a'
@@ -502,7 +512,7 @@ function TagGroup({ prefix, tags, selectedId, activeId, searchText, onSelect }) 
         </span>
         <span style={{ fontFamily: MONO, fontSize: 9, color: '#64748b' }}>{tags.length}</span>
       </div>
-      {open && tags.map(tag => (
+      {open && tags.filter(Boolean).map(tag => (
         <TagRow
           key={tag.id}
           tag={tag}
@@ -558,7 +568,7 @@ function TagRow({ tag, selected, active, searchText, onSelect }) {
         </div>
         {tag.description && (
           <div style={{ fontFamily: SANS, fontSize: 9, color: '#64748b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 1 }}>
-            {highlightText(tag.description.length > 38 ? tag.description.slice(0, 38) + '…' : tag.description, searchText)}
+            {highlightText(safeStr(tag.description).length > 38 ? safeStr(tag.description).slice(0, 38) + '…' : safeStr(tag.description), searchText)}
           </div>
         )}
       </div>
@@ -1219,7 +1229,7 @@ function StandardsTab({ standards, onDelete, onAdd }) {
                   color: STD_PURPLE, letterSpacing: 1, textTransform: 'uppercase',
                   borderBottom: `1px solid ${BORDER}`, marginBottom: 2,
                 }}>{cat}</div>
-                {items.map(s => (
+                {items.filter(Boolean).map(s => (
                   <div key={s.id} style={{
                     padding: '6px 12px', display: 'flex', alignItems: 'flex-start',
                     gap: 8, borderBottom: `1px solid ${BORDER}08`,
@@ -1501,7 +1511,7 @@ function DocumentsTab({ docs }) {
 
   return (
     <div style={{ padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 4 }}>
-      {docs.map(doc => (
+      {docs.filter(Boolean).map(doc => (
         <DocCard key={doc.id} doc={doc} />
       ))}
     </div>
@@ -1594,7 +1604,7 @@ function DocsTreeTab({ docs, projects, currentProject, onDelete, onReindexAll, o
             }}
           >
             <option value="__ALL__">All Projects ({docs.length})</option>
-            {projects.map(p => (
+            {projects.filter(Boolean).map(p => (
               <option key={p} value={p}>
                 {p} ({docs.filter(d => (d.project_name ?? 'Default') === p).length})
               </option>
@@ -1717,7 +1727,7 @@ function FileTypeGroup({ label, docs, selectedId, searchText, onSelect, onDelete
         </span>
         <span style={{ fontFamily: MONO, fontSize: 9, color: '#64748b' }}>{docs.length}</span>
       </div>
-      {open && docs.map(doc => (
+      {open && docs.filter(Boolean).map(doc => (
         <DocTreeRow
           key={doc.id}
           doc={doc}
@@ -1805,7 +1815,7 @@ function DocTreeRow({ doc, selected, searchText, onSelect, onDelete, onRename })
           {doc.description && (
             <div style={{ fontFamily: SANS, fontSize: 9, color: TEXTM, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 1 }}>
               {highlightText(
-                doc.description.length > 60 ? doc.description.slice(0, 60) + '…' : doc.description,
+                safeStr(doc.description).length > 60 ? safeStr(doc.description).slice(0, 60) + '…' : safeStr(doc.description),
                 searchText
               )}
             </div>
@@ -2000,7 +2010,7 @@ function IssuesTab({ issues, onClassify }) {
 
   return (
     <div style={{ padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 6 }}>
-      {issues.map(issue => (
+      {issues.filter(Boolean).map(issue => (
         <IssueCard
           key={issue.id}
           issue={issue}
@@ -2570,10 +2580,17 @@ export default function App() {
     try {
       const prefix = activeTag ? `[Tag: ${activeTag.name}] ` : ''
       const resp   = await api('POST', '/api/query/send', { message: prefix + text })
+      const responseText = typeof resp === 'string'
+        ? resp
+        : resp?.response
+          ?? resp?.text
+          ?? resp?.answer
+          ?? (resp?.ok === false ? 'Error: ' + resp?.error : null)
+          ?? 'No response received.'
       setMessages(prev => [...prev, {
         role: 'assistant',
-        text: resp ?? 'No response received.',
-        citations: [],
+        text: responseText,
+        citations: resp?.citations ?? [],
       }])
     } catch (err) {
       setMessages(prev => [...prev, {

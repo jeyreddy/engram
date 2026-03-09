@@ -21,7 +21,7 @@
 
 import { Router }                                from 'express';
 import { upload }                                from './upload.js';
-import { readdirSync, readFileSync, existsSync } from 'fs';
+import { readdirSync, readFileSync, existsSync, mkdirSync, copyFileSync, unlinkSync } from 'fs';
 import { basename, extname, join }               from 'path';
 import { createHash }                            from 'crypto';
 
@@ -94,6 +94,95 @@ async function indexStandardFile(db, stdStore, filePath, { title, category, scop
 
 export function registerRoutes(app, db, store, stdStore, repoPath) {
   const router = Router();
+
+  // ── Schema migrations (run once at startup) ────────────────────────────────
+  // Wrap every ALTER in try/catch — SQLite throws "duplicate column name" if
+  // the column already exists, which we intentionally swallow.
+  // This mirrors the strategy in ipc.cjs so both Electron and web modes stay
+  // schema-compatible with databases created by either entry point.
+
+  try { db.prepare("ALTER TABLE documents ADD COLUMN project_name  TEXT    DEFAULT 'Default'").run(); } catch (_) {}
+  try { db.prepare("ALTER TABLE documents ADD COLUMN chunk_count   INTEGER DEFAULT 0").run();          } catch (_) {}
+  try { db.prepare("ALTER TABLE documents ADD COLUMN display_name  TEXT").run();                       } catch (_) {}
+  try { db.prepare("ALTER TABLE documents ADD COLUMN description   TEXT").run();                       } catch (_) {}
+
+  try { db.prepare("ALTER TABLE tags ADD COLUMN tag_id          TEXT").run();                          } catch (_) {}
+  try { db.prepare("ALTER TABLE tags ADD COLUMN description     TEXT").run();                          } catch (_) {}
+  try { db.prepare("ALTER TABLE tags ADD COLUMN instrument_type TEXT").run();                          } catch (_) {}
+  try { db.prepare("ALTER TABLE tags ADD COLUMN area            TEXT DEFAULT 'Default'").run();        } catch (_) {}
+  try { db.prepare("ALTER TABLE tags ADD COLUMN make            TEXT").run();                          } catch (_) {}
+  try { db.prepare("ALTER TABLE tags ADD COLUMN model           TEXT").run();                          } catch (_) {}
+  try { db.prepare("ALTER TABLE tags ADD COLUMN status          TEXT DEFAULT 'active'").run();         } catch (_) {}
+  try { db.prepare("ALTER TABLE tags ADD COLUMN notes           TEXT").run();                          } catch (_) {}
+  try { db.prepare("ALTER TABLE tags ADD COLUMN updated_at      TEXT").run();                          } catch (_) {}
+  try { db.prepare("UPDATE tags SET tag_id = name WHERE tag_id IS NULL").run();                        } catch (_) {}
+
+  try {
+    db.prepare(`CREATE TABLE IF NOT EXISTS standards_documents (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      file_path TEXT,
+      file_type TEXT,
+      category TEXT DEFAULT 'General',
+      scope TEXT DEFAULT 'company',
+      version TEXT,
+      effective_date TEXT,
+      description TEXT,
+      checksum TEXT,
+      chunk_count INTEGER DEFAULT 0,
+      indexed_at TEXT,
+      status TEXT DEFAULT 'active',
+      created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    )`).run();
+  } catch (_) {}
+
+  try {
+    db.prepare(`CREATE TABLE IF NOT EXISTS standards_extracted (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      standard_id INTEGER NOT NULL,
+      field_name TEXT,
+      field_value TEXT,
+      context TEXT,
+      created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      FOREIGN KEY(standard_id) REFERENCES standards_documents(id)
+    )`).run();
+  } catch (_) {}
+
+  try {
+    db.prepare(`CREATE TABLE IF NOT EXISTS standards_registry (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      standard_number TEXT    NOT NULL,
+      standard_name   TEXT,
+      category        TEXT    DEFAULT 'General',
+      notes           TEXT,
+      active          INTEGER DEFAULT 1,
+      created_at      TEXT    DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    )`).run();
+  } catch (_) {}
+
+  try {
+    db.prepare(`CREATE TABLE IF NOT EXISTS document_projects (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      document_id INTEGER NOT NULL,
+      project_name TEXT   NOT NULL,
+      added_at    TEXT    DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      UNIQUE(document_id, project_name)
+    )`).run();
+  } catch (_) {}
+
+  // Strip timestamp prefixes from titles written by earlier multer-based uploads.
+  // Pattern: exactly 13 digits followed by a hyphen at the start of the title,
+  // e.g. "1710000000000-datasheet.pdf" → "datasheet.pdf".
+  try {
+    const docs = db.prepare('SELECT id, title FROM documents').all();
+    for (const doc of docs) {
+      if (!doc.title || typeof doc.title !== 'string') continue;
+      const cleaned = doc.title.replace(/^\d{13}-/, '');
+      if (cleaned !== doc.title) {
+        db.prepare('UPDATE documents SET title = ? WHERE id = ?').run(cleaned, doc.id);
+      }
+    }
+  } catch (_) {}
 
   // ── Workspace ──────────────────────────────────────────────────────────────
 
@@ -250,12 +339,20 @@ export function registerRoutes(app, db, store, stdStore, repoPath) {
           if (allTagRows.length > 0) {
             const byDoc = {};
             for (const row of allTagRows) {
-              if (!isValidTag(row.tag_value)) continue;
               if (!byDoc[row.filename]) byDoc[row.filename] = [];
               byDoc[row.filename].push(row.tag_value);
             }
             for (const [filename, tags] of Object.entries(byDoc)) {
-              const uniqueTags = [...new Set(tags)].sort();
+              const uniqueTags = [...new Set(tags)]
+                .filter(t => {
+                  if (!t) return false;
+                  const v = t.toString().trim();
+                  if (v.endsWith('W') && /^\d/.test(v)) return false;
+                  if (v.includes('W/ft')) return false;
+                  if (/^\d{1,2}$/.test(v)) return false;
+                  return true;
+                })
+                .sort();
               keywordChunks.unshift({
                 metadata: { filename, doc_type: 'complete_tag_list', source: 'database_direct' },
                 text: `Complete tag list from ${filename}:\n` + uniqueTags.join('\n'),
@@ -263,6 +360,32 @@ export function registerRoutes(app, db, store, stdStore, repoPath) {
             }
           }
         } catch (e) { console.error('[query] direct tag list error:', e.message); }
+      }
+
+      // Also inject a flat tag registry chunk for tag/instrument queries
+      const isTagListQuery =
+        userMessage.toLowerCase().includes('tag') ||
+        userMessage.toLowerCase().includes('instrument');
+
+      if (isTagListQuery) {
+        try {
+          const tagRows = db.prepare(`
+            SELECT DISTINCT ev.field_value as tag_id, d.title as filename
+            FROM extracted_values ev
+            JOIN documents d ON d.id = ev.document_id
+            WHERE ev.field_name = 'Tag' AND ev.field_value IS NOT NULL
+            ORDER BY ev.field_value
+            LIMIT 200
+          `).all();
+
+          if (tagRows.length > 0) {
+            const tagList = tagRows.map(r => r.tag_id).join(', ');
+            keywordChunks.unshift({
+              metadata: { filename: 'Tag Registry (extracted)', doc_type: 'registry' },
+              text: 'All tags found in documents: ' + tagList,
+            });
+          }
+        } catch (e) { console.warn('[query] tag registry chunk failed:', e.message); }
       }
 
       let vectorChunks = [];
@@ -327,10 +450,10 @@ export function registerRoutes(app, db, store, stdStore, repoPath) {
       } catch (e) { console.warn('[query] registry fetch failed:', e.message); }
 
       const answer = await queryWithContext(db, userMessage, allChunks, registryContext || undefined);
-      res.json(answer);
+      res.json({ ok: true, response: String(answer) });
     } catch (e) {
       console.error('[query:send] error:', e.message);
-      res.status(500).json({ error: e.message });
+      res.status(500).json({ ok: false, error: e.message });
     }
   });
 
@@ -358,14 +481,25 @@ export function registerRoutes(app, db, store, stdStore, repoPath) {
     const tagId       = req.body.tagId ? Number(req.body.tagId) : null;
     const results     = [];
 
+    // Ensure permanent uploads directory exists inside the workspace
+    const uploadsDir = join(repoPath, 'uploads');
+    mkdirSync(uploadsDir, { recursive: true });
+
     for (const file of (req.files ?? [])) {
+      const originalName = String(file.originalname || basename(file.path));
+      // Move from OS temp dir → workspace/uploads/<originalname>
+      const destPath = join(uploadsDir, originalName);
+      try { copyFileSync(file.path, destPath); } catch (_) {}
+      try { unlinkSync(file.path); } catch (_) {}
+
       try {
-        const result = await indexFile(db, store, file.path, tagId, 'unknown', {
-          filename: file.originalname,
+        const result = await indexFile(db, store, destPath, tagId, 'unknown', {
+          filename:   originalName,
           uploadedBy: 'engineer',
         });
         const { docId, chunksIndexed, ocrRequired } = result;
-        try { db.prepare('UPDATE documents SET chunk_count = ?, project_name = ? WHERE id = ?').run(chunksIndexed, projectName, docId); } catch (_) {}
+        // Ensure title and project are correct (indexFile uses basename which may differ)
+        try { db.prepare('UPDATE documents SET title = ?, chunk_count = ?, project_name = ? WHERE id = ?').run(originalName, chunksIndexed, projectName, docId); } catch (_) {}
 
         // Auto-extract tag references
         try {

@@ -9,6 +9,7 @@ export default defineConfig({
     //   app.use(express.static(path.join(__dirname, '../../dist')))
     outDir: "../../dist",
     emptyOutDir: true,
+    sourcemap: true,
   },
   server: {
     port: 5173,
