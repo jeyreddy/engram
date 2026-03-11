@@ -2564,7 +2564,7 @@ export default function App() {
   }, [activeTag?.id])
 
   // ── Derived stats ────────────────────────────────────────────────────────
-  const totalDocs   = tags.reduce((s, t) => s + (t.docCount   ?? 0), 0)
+  const totalDocs   = allDocs.length
   const totalIssues = tags.reduce((s, t) => s + (t.issueCount ?? 0), 0)
   const totalErrors = tags.reduce((s, t) => s + (t.errorCount ?? 0), 0)
 
