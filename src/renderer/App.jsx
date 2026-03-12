@@ -230,12 +230,10 @@ function CoverageBar({ pct = 0 }) {
 }
 
 // ── TopBar ────────────────────────────────────────────────────────────────────
-
-function TopBar({ engineerName, totalDocs, totalIssues, totalErrors }) {
+function TopBar({ engineerName, totalDocs, totalIssues, totalErrors, onEditConfig }) {
   const [savedMsg, setSavedMsg] = useState(false)
-
   const handleEditConfig = () => {
-    // No-op in web mode — config is managed server-side via workspace API
+    if (onEditConfig) onEditConfig()
   }
 
   const handleSaveConfig = async () => {
@@ -2225,7 +2223,94 @@ function WizardField({ label, value, onChange, type = 'text', placeholder = '' }
     </div>
   )
 }
+function ConfigPanel({ onClose, onSaved }) {
+  const [cfg, setCfg] = useState({
+    engineer_name: '', engineer_email: '', plant_name: '', area: ''
+  })
+  const [saving, setSaving] = useState(false)
+  const [msg,    setMsg]    = useState('')
 
+  useEffect(() => {
+    api('GET', '/api/workspace/config').then(data => {
+      if (data) setCfg({
+        engineer_name:  data.engineer_name  ?? '',
+        engineer_email: data.engineer_email ?? '',
+        plant_name:     data.plant_name     ?? '',
+        area:           data.area           ?? '',
+      })
+    })
+  }, [])
+
+  const handleSave = async () => {
+    setSaving(true)
+    try {
+      await api('POST', '/api/workspace/setup', {
+        engineerName:  cfg.engineer_name,
+        engineerEmail: cfg.engineer_email,
+        plantName:     cfg.plant_name,
+        area:          cfg.area,
+      })
+      await api('POST', '/api/workspace/saveConfig')
+      setMsg('Saved')
+      setTimeout(() => { setMsg(''); onSaved() }, 1200)
+    } catch (e) {
+      setMsg('Error: ' + e.message)
+    }
+    setSaving(false)
+  }
+
+  const field = (label, key) => (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ fontSize: 11, fontWeight: 600, color: '#64748b', marginBottom: 4, letterSpacing: 1 }}>
+        {label}
+      </div>
+      <input
+        value={cfg[key]}
+        onChange={e => setCfg(p => ({ ...p, [key]: e.target.value }))}
+        style={{
+          width: '100%', padding: '8px 12px', borderRadius: 6,
+          border: '1px solid #cbd5e1', fontSize: 14,
+          background: '#f8fafc', color: '#0f172a', boxSizing: 'border-box',
+        }}
+      />
+    </div>
+  )
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 999,
+    }}>
+      <div style={{
+        background: '#fff', borderRadius: 12, padding: 32, width: 480,
+        boxShadow: '0 20px 60px rgba(0,0,0,0.2)',
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
+          <span style={{ fontSize: 16, fontWeight: 700, color: '#0f172a' }}>Edit Configuration</span>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 20, color: '#64748b' }}>×</button>
+        </div>
+        {field('ENGINEER NAME',  'engineer_name')}
+        {field('ENGINEER EMAIL', 'engineer_email')}
+        {field('PLANT NAME',     'plant_name')}
+        {field('AREA / UNIT',    'area')}
+        {msg && (
+          <div style={{ marginBottom: 12, fontSize: 13, fontWeight: 600,
+            color: msg.startsWith('Error') ? '#dc2626' : '#16a34a' }}>
+            {msg}
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 8 }}>
+          <button onClick={onClose} style={{ padding: '8px 20px', borderRadius: 6, border: '1px solid #cbd5e1', background: '#f8fafc', cursor: 'pointer', fontSize: 13 }}>
+            Cancel
+          </button>
+          <button onClick={handleSave} disabled={saving} style={{ padding: '8px 20px', borderRadius: 6, border: 'none', background: '#1d4ed8', color: '#fff', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
+            {saving ? 'Saving...' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
 function SetupWizard({ onComplete }) {
   const [step,          setStep]          = useState(0)
   const [engineerName,  setEngineerName]  = useState('')
@@ -2488,6 +2573,7 @@ export default function App() {
   const [projects,      setProjects]      = useState(['Default'])
   const [currentProject, setCurrentProject] = useState('Default')
   const [standards,     setStandards]     = useState([])
+  const [showConfig,    setShowConfig]    = useState(false)
 
   // ── Check if workspace is initialised ────────────────────────────────────
   useEffect(() => {
@@ -2564,7 +2650,7 @@ export default function App() {
   }, [activeTag?.id])
 
   // ── Derived stats ────────────────────────────────────────────────────────
-  const totalDocs   = allDocs.length
+  const totalDocs   = tags.reduce((s, t) => s + (t.docCount   ?? 0), 0)
   const totalIssues = tags.reduce((s, t) => s + (t.issueCount ?? 0), 0)
   const totalErrors = tags.reduce((s, t) => s + (t.errorCount ?? 0), 0)
 
@@ -2724,6 +2810,22 @@ export default function App() {
 
   // ── Render ────────────────────────────────────────────────────────────────
   // Still checking setup status — show blank screen to avoid flicker
+  if (showConfig) {
+    return (
+      <>
+        <style>{STYLE_TAG}</style>
+        <ConfigPanel
+          onClose={() => setShowConfig(false)}
+          onSaved={() => {
+            setShowConfig(false)
+            api('GET', '/api/workspace/config').then(cfg => {
+              if (cfg?.engineer_name) setEngineerName(cfg.engineer_name)
+            })
+          }}
+        />
+      </>
+    )
+  }
   if (setupDone === null) {
     return <><style>{STYLE_TAG}</style><div style={{ height: '100vh', background: BG }} /></>
   }
@@ -2765,6 +2867,7 @@ export default function App() {
           totalDocs={totalDocs}
           totalIssues={totalIssues}
           totalErrors={totalErrors}
+          onEditConfig={() => setShowConfig(prev => !prev)}
         />
 
         {/* Three-panel body */}
