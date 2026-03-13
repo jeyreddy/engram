@@ -89,9 +89,23 @@ async function start() {
     res.sendFile(path.join(distPath, 'index.html'));
   });
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n  ENGRAM running on http://0.0.0.0:${PORT}\n`);
   });
+
+  // Graceful shutdown — release the port before process exits so PM2 can
+  // restart cleanly without hitting EADDRINUSE.
+  const shutdown = (signal) => {
+    console.log(`[engram] ${signal} received — closing server`);
+    server.close(() => {
+      console.log('[engram] server closed');
+      process.exit(0);
+    });
+    // Force exit after 5 s if connections don't drain
+    setTimeout(() => process.exit(1), 5000).unref();
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT',  () => shutdown('SIGINT'));
 }
 
 start().catch(err => {
