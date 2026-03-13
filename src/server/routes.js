@@ -22,6 +22,7 @@
 import { Router }                                from 'express';
 import { upload }                                from './upload.js';
 import { readdirSync, readFileSync, existsSync, mkdirSync, copyFileSync, unlinkSync } from 'fs';
+import { exec } from 'child_process';
 import { basename, extname, join }               from 'path';
 import { createHash }                            from 'crypto';
 
@@ -209,9 +210,20 @@ export function registerRoutes(app, db, store, stdStore, repoPath) {
     try {
       const config = req.body;
 
+      // Support both camelCase (from SetupWizard) and snake_case (from ConfigPanel)
+      const nameMap = {
+        engineerName:  'engineer_name',
+        engineerEmail: 'engineer_email',
+        plantName:     'plant_name',
+        area:          'area',
+      };
+
       for (const [key, value] of Object.entries(config)) {
-        if (key !== 'source_paths') setConfig(db, key, String(value));
+        if (key === 'source_paths') continue;
+        const storeKey = nameMap[key] ?? key;
+        setConfig(db, storeKey, String(value));
       }
+
       if (Array.isArray(config.source_paths) && config.source_paths.length > 0) {
         setConfig(db, 'source_paths', JSON.stringify(config.source_paths));
       }
@@ -464,6 +476,7 @@ export function registerRoutes(app, db, store, stdStore, repoPath) {
       const docs = db.prepare(`
         SELECT d.id, d.title, d.file_type, d.revision, d.project_name,
                d.created_at, d.chunk_count, d.tag_id, d.display_name, d.description,
+               d.file_path,
                COUNT(ev.id) as field_count
         FROM documents d
         LEFT JOIN extracted_values ev ON ev.document_id = d.id
@@ -520,6 +533,21 @@ export function registerRoutes(app, db, store, stdStore, repoPath) {
     }
 
     res.json({ ok: true, results });
+  });
+
+  router.post('/api/docs/open', (req, res) => {
+    const { filePath } = req.body;
+    if (!filePath) return res.json({ ok: false, error: 'filePath required' });
+    if (!existsSync(filePath)) return res.json({ ok: false, error: 'File not found on server' });
+    const cmd = process.platform === 'win32'
+      ? `start "" "${filePath.replace(/"/g, '\\"')}"`
+      : process.platform === 'darwin'
+      ? `open "${filePath.replace(/"/g, '\\"')}"`
+      : `xdg-open "${filePath.replace(/"/g, '\\"')}"`;
+    exec(cmd, err => {
+      if (err) res.json({ ok: false, error: err.message });
+      else      res.json({ ok: true });
+    });
   });
 
   router.post('/api/docs/delete', async (req, res) => {
@@ -837,10 +865,23 @@ export function registerRoutes(app, db, store, stdStore, repoPath) {
       if (!file) return res.json({ ok: false, error: 'No file uploaded' });
 
       const { title, category, version, effectiveDate, description, scope } = req.body;
+
+      // Pre-check extraction quality before committing to DB
+      const { text: previewText } = await extractText(file.path);
+      const charCount = (previewText || '').trim().length;
+
+      if (charCount < 100) {
+        return res.json({
+          ok: false,
+          error: `Extraction failed — only ${charCount} characters extracted from this file. It may be a scanned PDF with no text layer. OCR support coming soon.`,
+          charCount,
+        });
+      }
+
       const result = await indexStandardFile(db, stdStore, file.path, {
         title, category, version, effectiveDate, description, scope,
       });
-      res.json({ ok: true, ...result });
+      res.json({ ok: true, ...result, charCount });
     } catch (e) {
       console.error('[standards:add] error:', e.message);
       res.json({ ok: false, error: e.message });

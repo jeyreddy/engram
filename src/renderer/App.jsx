@@ -230,7 +230,7 @@ function CoverageBar({ pct = 0 }) {
 }
 
 // ── TopBar ────────────────────────────────────────────────────────────────────
-function TopBar({ engineerName, totalDocs, totalIssues, totalErrors, onEditConfig }) {
+function TopBar({ engineerName, totalDocs, totalIssues, totalErrors, onEditConfig, lightMode, onToggleLight }) {
   const [savedMsg, setSavedMsg] = useState(false)
   const handleEditConfig = () => {
     if (onEditConfig) onEditConfig()
@@ -271,6 +271,15 @@ function TopBar({ engineerName, totalDocs, totalIssues, totalErrors, onEditConfi
       <div style={{ flex: 1 }} />
 
       {/* Config buttons */}
+      <button
+        onClick={onToggleLight}
+        title={lightMode ? 'Switch to dark theme' : 'Switch to light theme'}
+        style={{
+          background: '#0d2035', color: '#64748b', border: '1px solid #081828',
+          fontFamily: MONO, fontSize: 10, padding: '4px 8px',
+          borderRadius: 3, cursor: 'pointer',
+        }}
+      >{lightMode ? '🌙 Dark' : '☀ Light'}</button>
       <button
         onClick={handleEditConfig}
         title="Open workspace.config.json in Notepad"
@@ -316,15 +325,16 @@ function StatPill({ label, value, color, pulse }) {
 
 // ── Left Panel — Tag Registry ─────────────────────────────────────────────────
 
-function LeftPanel({ tags, activeTag, onSelectTag, onCreateTag, onUpdateTag, onDeleteTag, onCopyTag, onAddDocs, onReindex }) {
+function LeftPanel({ tags, activeTag, onSelectTag, onCreateTag, onUpdateTag, onDeleteTag, onCopyTag, onAddDocs, onReindex, width = 240 }) {
   const [searchText,    setSearchText]    = useState('')
   const [selectedTag,   setSelectedTag]   = useState(null)
   const [showAddForm,   setShowAddForm]   = useState(false)
   const [reindexing,    setReindexing]    = useState(false)
-  const [cleanupMsg,    setCleanupMsg]    = useState(null)   // null | string
+  const [cleanupMsg,    setCleanupMsg]    = useState(null)
   const [hoverAdd,      setHoverAdd]      = useState(false)
   const [hoverReindex,  setHoverReindex]  = useState(false)
   const [hoverCleanup,  setHoverCleanup]  = useState(false)
+  const [drilldownTag,  setDrilldownTag]  = useState(null)  // UI-02
 
   const handleReindexClick = () => {
     setReindexing(true)
@@ -372,7 +382,7 @@ function LeftPanel({ tags, activeTag, onSelectTag, onCreateTag, onUpdateTag, onD
 
   return (
     <div style={{
-      width: 240, flexShrink: 0,
+      width, flexShrink: 0,
       background: '#030e1a', borderRight: '1px solid #081828',
       display: 'flex', flexDirection: 'column', overflow: 'hidden',
     }}>
@@ -429,6 +439,7 @@ function LeftPanel({ tags, activeTag, onSelectTag, onCreateTag, onUpdateTag, onD
             activeId={activeTag?.id}
             searchText={searchText}
             onSelect={handleSelect}
+            onDrilldown={tag => setDrilldownTag(tag)}
           />
         ))}
       </div>
@@ -442,6 +453,14 @@ function LeftPanel({ tags, activeTag, onSelectTag, onCreateTag, onUpdateTag, onD
           onUpdate={data => { onUpdateTag(data); setSelectedTag(prev => prev ? { ...prev, ...data } : null) }}
           onDelete={tagId => { onDeleteTag(tagId); setSelectedTag(null); onSelectTag(null) }}
           onCopy={(tagId, newId) => onCopyTag(tagId, newId)}
+        />
+      )}
+
+      {/* Drill-down modal — rendered as a portal-style overlay (UI-02) */}
+      {drilldownTag && (
+        <TagDrilldownModal
+          tag={drilldownTag}
+          onClose={() => setDrilldownTag(null)}
         />
       )}
 
@@ -493,7 +512,138 @@ function LeftPanel({ tags, activeTag, onSelectTag, onCreateTag, onUpdateTag, onD
   )
 }
 
-function TagGroup({ prefix, tags, selectedId, activeId, searchText, onSelect }) {
+// ── Tag Drill-down Modal (UI-02) ──────────────────────────────────────────────
+function TagDrilldownModal({ tag, onClose }) {
+  const [docs,    setDocs]    = useState(null)
+  const [opening, setOpening] = useState(null)
+  const tagId = tag.tag_id || tag.name || ''
+
+  useEffect(() => {
+    api('POST', '/api/docs/get', { tagId: tag.id })
+      .then(d => setDocs(Array.isArray(d) ? d : []))
+      .catch(() => setDocs([]))
+  }, [tag.id])
+
+  const openFile = async (doc) => {
+    if (!doc.file_path) return
+    setOpening(doc.id)
+    await api('POST', '/api/docs/open', { filePath: doc.file_path }).catch(() => {})
+    setTimeout(() => setOpening(null), 1500)
+  }
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, zIndex: 200,
+        background: 'rgba(2,8,16,.75)', display: 'flex',
+        alignItems: 'center', justifyContent: 'center',
+      }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          background: '#041220', border: `1px solid ${BORDER2}`,
+          borderRadius: 8, width: 480, maxHeight: '70vh',
+          display: 'flex', flexDirection: 'column',
+          boxShadow: '0 16px 48px rgba(0,0,0,.7)',
+        }}
+      >
+        {/* Header */}
+        <div style={{
+          padding: '12px 16px', borderBottom: `1px solid ${BORDER}`,
+          display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0,
+        }}>
+          <span style={{ fontFamily: MONO, fontSize: 14, color: ACCENT, fontWeight: 700, flex: 1 }}>
+            {tagId}
+          </span>
+          <span style={{ fontFamily: MONO, fontSize: 9, color: TEXTM }}>
+            {docs === null ? '…' : `${docs.length} document${docs.length !== 1 ? 's' : ''}`}
+          </span>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', color: TEXTM, cursor: 'pointer', fontSize: 16, padding: '0 2px' }}>×</button>
+        </div>
+
+        {/* Tag metadata */}
+        <div style={{ padding: '8px 16px', borderBottom: `1px solid ${BORDER}`, flexShrink: 0 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '4px 12px' }}>
+            {[
+              ['TYPE',   tag.instrument_type],
+              ['AREA',   tag.area],
+              ['STATUS', tag.status],
+              ['MAKE',   tag.make],
+              ['MODEL',  tag.model],
+            ].filter(([, v]) => v).map(([k, v]) => (
+              <div key={k}>
+                <div style={{ fontFamily: MONO, fontSize: 7, color: TEXTD }}>{k}</div>
+                <div style={{ fontFamily: MONO, fontSize: 10, color: TEXT }}>{v}</div>
+              </div>
+            ))}
+          </div>
+          {tag.description && (
+            <div style={{ fontFamily: SANS, fontSize: 10, color: TEXTM, marginTop: 6 }}>{tag.description}</div>
+          )}
+        </div>
+
+        {/* Document list */}
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {docs === null && (
+            <div style={{ padding: 24, textAlign: 'center', fontFamily: MONO, fontSize: 10, color: TEXTD }}>Loading…</div>
+          )}
+          {docs?.length === 0 && (
+            <div style={{ padding: 24, textAlign: 'center', fontFamily: MONO, fontSize: 10, color: TEXTD }}>
+              No documents linked to this tag.
+            </div>
+          )}
+          {docs?.map(doc => {
+            const color = fileTypeBadgeColor(doc.file_type)
+            const name  = doc.display_name || doc.title
+            return (
+              <div key={doc.id} style={{
+                padding: '10px 16px', borderBottom: `1px solid ${BORDER}`,
+                display: 'flex', alignItems: 'center', gap: 10,
+              }}>
+                <span style={{ width: 6, height: 6, borderRadius: 1, background: color, flexShrink: 0 }} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontFamily: MONO, fontSize: 10, color: TEXT, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {name}
+                  </div>
+                  <div style={{ fontFamily: MONO, fontSize: 8, color: TEXTM, marginTop: 2 }}>
+                    {doc.file_type?.toUpperCase()}
+                    {doc.revision  ? ` · Rev ${doc.revision}` : ''}
+                    {doc.chunk_count > 0 ? ` · ${doc.chunk_count} chunks` : ''}
+                    {' · '}{relativeTime(doc.created_at)}
+                  </div>
+                </div>
+                {doc.file_path && (
+                  <button
+                    onClick={() => openFile(doc)}
+                    title="Open file on server"
+                    style={{
+                      background: opening === doc.id ? ACCENTD : BORDER,
+                      border: `1px solid ${opening === doc.id ? ACCENT + '60' : BORDER2}`,
+                      color: opening === doc.id ? ACCENT : TEXTM,
+                      fontFamily: MONO, fontSize: 9, padding: '3px 8px',
+                      borderRadius: 3, cursor: 'pointer', flexShrink: 0,
+                      transition: 'all .15s',
+                    }}
+                  >{opening === doc.id ? '↗ Opening…' : '↗ Open'}</button>
+                )}
+              </div>
+            )
+          })}
+        </div>
+
+        <div style={{ padding: '8px 16px', borderTop: `1px solid ${BORDER}`, flexShrink: 0 }}>
+          <div style={{ fontFamily: MONO, fontSize: 8, color: TEXTD }}>
+            DOUBLE-CLICK any tag in the sidebar to open this view · ESC to close
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function TagGroup({ prefix, tags, selectedId, activeId, searchText, onSelect, onDrilldown }) {
   const [open, setOpen] = useState(true)
   return (
     <div>
@@ -518,13 +668,14 @@ function TagGroup({ prefix, tags, selectedId, activeId, searchText, onSelect }) 
           active={tag.id === activeId}
           searchText={searchText}
           onSelect={() => onSelect(tag)}
+          onDrilldown={() => onDrilldown?.(tag)}
         />
       ))}
     </div>
   )
 }
 
-function TagRow({ tag, selected, active, searchText, onSelect }) {
+function TagRow({ tag, selected, active, searchText, onSelect, onDrilldown }) {
   const [hover, setHover] = useState(false)
   const tagId      = tag.tag_id || tag.name || ''
   const statusColor = tag.status === 'active' ? '#22c55e' : tag.status === 'inactive' ? '#475569' : '#f59e0b'
@@ -534,6 +685,8 @@ function TagRow({ tag, selected, active, searchText, onSelect }) {
   return (
     <div
       onClick={onSelect}
+      onDoubleClick={onDrilldown}
+      title="Single-click to query · Double-click to see all documents"
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{
@@ -788,7 +941,7 @@ function TagDetailCard({ tag, onClose, onUpdate, onDelete, onCopy }) {
 
 // ── Centre Panel ──────────────────────────────────────────────────────────────
 
-function CentrePanel({ activeTag, messages, isLoading, inputText, onInputChange, onSend, onKeyDown, onAcceptDiff, onRejectDiff }) {
+function CentrePanel({ activeTag, messages, isLoading, inputText, onInputChange, onSend, onKeyDown, onAcceptDiff, onRejectDiff, onClearTag }) {
   const endRef = useRef(null)
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
@@ -818,6 +971,16 @@ function CentrePanel({ activeTag, messages, isLoading, inputText, onInputChange,
             )}
             <div style={{ flex: 1 }} />
             <Badge bg={ACCENTD} color={ACCENT}>ACTIVE</Badge>
+            <button
+              onClick={onClearTag}
+              title="Clear tag context — return to general query mode"
+              style={{
+                background: 'transparent', border: `1px solid ${BORDER2}`,
+                color: TEXTM, cursor: 'pointer', fontSize: 14,
+                padding: '0 6px', borderRadius: 3, lineHeight: 1.6,
+                marginLeft: 4, transition: 'color .1s',
+              }}
+            >×</button>
           </>
         ) : (
           <span style={{ fontFamily: MONO, fontSize: 10, color: TEXTD }}>
@@ -1243,6 +1406,10 @@ function StandardsTab({ standards, onDelete, onAdd }) {
                       }}>{s.title || s.filename}</div>
                       <div style={{ fontFamily: MONO, fontSize: 8, color: TEXTM, marginTop: 1 }}>
                         {s.year ? `${s.year} · ` : ''}{s.filename}
+                        {s.chunk_count > 0
+                          ? <span style={{ color: OK }}> · {s.chunk_count} chunks indexed</span>
+                          : <span style={{ color: WARN }}> · not indexed — may be scanned PDF</span>
+                        }
                       </div>
                     </div>
                     <button onClick={() => onDelete?.(s.id)} style={{
@@ -1430,10 +1597,10 @@ function RegistryNotepad() {
   )
 }
 
-function RightPanel({ activeTag, allDocs, projects, currentProject, issues, activeTab, onTabChange, onClassifyIssue, onDeleteDoc, onReindexAll, onSetProject, onNewProject, onRenameDoc, standards, onStandardsRefresh }) {
+function RightPanel({ activeTag, allDocs, projects, currentProject, issues, activeTab, onTabChange, onClassifyIssue, onDeleteDoc, onReindexAll, onSetProject, onNewProject, onRenameDoc, standards, onStandardsRefresh, width = 280 }) {
   return (
     <div style={{
-      width: 280, flexShrink: 0,
+      width, flexShrink: 0,
       background: PANEL, borderLeft: `1px solid ${BORDER}`,
       display: 'flex', flexDirection: 'column',
       overflow: 'hidden',
@@ -1549,6 +1716,8 @@ function DocsTreeTab({ docs, projects, currentProject, onDelete, onReindexAll, o
   const [newProjName,  setNewProjName]  = useState('')
   const [showNewProj,  setShowNewProj]  = useState(false)
   const [searchText,   setSearchText]   = useState('')
+  const [focusIdx,     setFocusIdx]     = useState(-1)   // BUG-03: keyboard cursor
+  const listRef = useRef(null)
 
   const searchLower = searchText.toLowerCase()
 
@@ -1579,6 +1748,31 @@ function DocsTreeTab({ docs, projects, currentProject, onDelete, onReindexAll, o
     setNewProjName('')
     setShowNewProj(false)
   }
+
+  // BUG-03: flat ordered list for keyboard navigation
+  const flatList = groupKeys.flatMap(k => groups[k])
+
+  const handleListKeyDown = useCallback(e => {
+    if (!flatList.length) return
+    if (e.key === 'ArrowDown' || (e.key === 'Tab' && !e.shiftKey)) {
+      e.preventDefault()
+      const next = Math.min(focusIdx + 1, flatList.length - 1)
+      setFocusIdx(next)
+      setSelectedDoc(flatList[next])
+    } else if (e.key === 'ArrowUp' || (e.key === 'Tab' && e.shiftKey)) {
+      e.preventDefault()
+      const prev = Math.max(focusIdx - 1, 0)
+      setFocusIdx(prev)
+      setSelectedDoc(flatList[prev])
+    } else if (e.key === 'Escape') {
+      setSelectedDoc(null)
+      setFocusIdx(-1)
+    } else if (e.key === 'Delete' && selectedDoc) {
+      onDelete(selectedDoc.id)
+      setSelectedDoc(null)
+      setFocusIdx(-1)
+    }
+  }, [flatList, focusIdx, selectedDoc, onDelete])
 
   const handleRename = useCallback((docId, name, desc) => {
     onRename(docId, name, desc)
@@ -1676,8 +1870,13 @@ function DocsTreeTab({ docs, projects, currentProject, onDelete, onReindexAll, o
         )}
       </div>
 
-      {/* File tree */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '4px 0' }}>
+      {/* File tree — focusable for keyboard nav (BUG-03) */}
+      <div
+        ref={listRef}
+        tabIndex={0}
+        onKeyDown={handleListKeyDown}
+        style={{ flex: 1, overflowY: 'auto', padding: '4px 0', outline: 'none' }}
+      >
         {!searchText && filtered.length === 0 && <EmptyState text="No documents in this project." />}
         {groupKeys.map(key => (
           <FileTypeGroup
@@ -1686,7 +1885,7 @@ function DocsTreeTab({ docs, projects, currentProject, onDelete, onReindexAll, o
             docs={groups[key]}
             selectedId={selectedDoc?.id}
             searchText={searchText}
-            onSelect={setSelectedDoc}
+            onSelect={doc => { setSelectedDoc(doc); setFocusIdx(flatList.indexOf(doc)) }}
             onDelete={docId => { onDelete(docId); if (selectedDoc?.id === docId) setSelectedDoc(null) }}
             onRename={handleRename}
           />
@@ -1879,6 +2078,15 @@ function DocDetailPanel({ doc, onClose, onDelete, onRename }) {
   const [nameVal,     setNameVal]     = useState(doc.display_name || '')
   const [descVal,     setDescVal]     = useState(doc.description  || '')
   const [fields,      setFields]      = useState(null)
+  const [opening,     setOpening]     = useState(false)   // UI-03
+
+  const handleOpenFile = async () => {
+    if (!doc.file_path) return
+    setOpening(true)
+    const res = await api('POST', '/api/docs/open', { filePath: doc.file_path }).catch(() => ({ ok: false }))
+    if (!res?.ok) alert(`Could not open file:\n${doc.file_path}\n\nThe file may have moved or the server cannot access it.`)
+    setTimeout(() => setOpening(false), 1500)
+  }
 
   useEffect(() => {
     api('GET', `/api/docs/fields/${doc.id}`)
@@ -1992,6 +2200,22 @@ function DocDetailPanel({ doc, onClose, onDelete, onRename }) {
             </div>
           ))}
         </div>
+      )}
+
+      {doc.file_path && (
+        <button
+          onClick={handleOpenFile}
+          disabled={opening}
+          style={{
+            width: '100%', marginBottom: 6,
+            background: opening ? ACCENTD : BORDER,
+            border: `1px solid ${opening ? ACCENT + '60' : BORDER2}`,
+            color: opening ? ACCENT : TEXTM,
+            fontFamily: MONO, fontSize: 9, padding: '5px 8px',
+            borderRadius: 3, cursor: opening ? 'default' : 'pointer',
+            letterSpacing: .5, transition: 'all .15s',
+          }}
+        >{opening ? '↗ Opening…' : '↗ Open File on Server'}</button>
       )}
 
       <button
@@ -2574,6 +2798,10 @@ export default function App() {
   const [currentProject, setCurrentProject] = useState('Default')
   const [standards,     setStandards]     = useState([])
   const [showConfig,    setShowConfig]    = useState(false)
+  const [lightMode,     setLightMode]     = useState(false)
+  const [leftW,         setLeftW]         = useState(240)
+  const [rightW,        setRightW]        = useState(280)
+  const dragRef = useRef(null)  // { side:'left'|'right', startX, startW }
 
   // ── Check if workspace is initialised ────────────────────────────────────
   useEffect(() => {
@@ -2650,7 +2878,7 @@ export default function App() {
   }, [activeTag?.id])
 
   // ── Derived stats ────────────────────────────────────────────────────────
-  const totalDocs   = tags.reduce((s, t) => s + (t.docCount   ?? 0), 0)
+  const totalDocs   = allDocs.length
   const totalIssues = tags.reduce((s, t) => s + (t.issueCount ?? 0), 0)
   const totalErrors = tags.reduce((s, t) => s + (t.errorCount ?? 0), 0)
 
@@ -2726,25 +2954,42 @@ export default function App() {
     docFileInputRef.current?.click()
   }, [])
 
+  const [uploadQueue,   setUploadQueue]   = useState([])  // { name, status, error }
+
   const handleDocFileChange = useCallback(async (e) => {
     const files = Array.from(e.target.files ?? [])
     if (!files.length) return
-    e.target.value = '' // reset so the same file can be re-selected
+    e.target.value = ''
 
-    const formData = new FormData()
-    files.forEach(f => formData.append('files', f))
-    if (activeTag?.id) formData.append('tagId', String(activeTag.id))
+    // Build queue with initial 'queued' status
+    const queue = files.map(f => ({ name: f.name, status: 'queued', error: null }))
+    setUploadQueue(queue)
 
-    try {
-      await fetch('/api/docs/add', {
-        method: 'POST',
-        headers: { 'x-engram-token': TOKEN },
-        body: formData,
-      })
-    } catch (err) {
-      console.error('Add documents error:', err)
+    for (let i = 0; i < files.length; i++) {
+      // Mark as uploading
+      setUploadQueue(q => q.map((item, idx) => idx === i ? { ...item, status: 'uploading' } : item))
+      try {
+        const formData = new FormData()
+        formData.append('files', files[i])
+        if (activeTag?.id) formData.append('tagId', String(activeTag.id))
+        const res = await fetch('/api/docs/add', {
+          method: 'POST',
+          headers: { 'x-engram-token': TOKEN },
+          body: formData,
+        }).then(r => r.json())
+        const fileResult = res?.results?.[0]
+        if (fileResult?.ok === false) {
+          setUploadQueue(q => q.map((item, idx) => idx === i ? { ...item, status: 'failed', error: fileResult.error ?? 'Failed' } : item))
+        } else {
+          setUploadQueue(q => q.map((item, idx) => idx === i ? { ...item, status: 'done' } : item))
+        }
+      } catch (err) {
+        setUploadQueue(q => q.map((item, idx) => idx === i ? { ...item, status: 'failed', error: err.message } : item))
+      }
     }
     loadAllDocs()
+    // Auto-clear queue after 8 seconds
+    setTimeout(() => setUploadQueue([]), 8000)
   }, [activeTag, loadAllDocs])
 
   const handleDeleteDoc = useCallback(async (docId) => {
@@ -2808,6 +3053,21 @@ export default function App() {
     }])
   }, [])
 
+  // ── Panel resize ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    const onMove = e => {
+      if (!dragRef.current) return
+      const { side, startX, startW } = dragRef.current
+      const delta = e.clientX - startX
+      if (side === 'left')  setLeftW(w  => Math.max(160, Math.min(420, startW + delta)))
+      else                  setRightW(w => Math.max(200, Math.min(520, startW - delta)))
+    }
+    const onUp = () => { dragRef.current = null; document.body.style.cursor = '' }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
+  }, [])
+
   // ── Render ────────────────────────────────────────────────────────────────
   // Still checking setup status — show blank screen to avoid flicker
   if (showConfig) {
@@ -2857,10 +3117,56 @@ export default function App() {
         onChange={handleDocFileChange}
       />
 
+      {/* Upload queue overlay */}
+      {uploadQueue.length > 0 && (
+        <div style={{
+          position: 'fixed', bottom: 20, right: 20, zIndex: 999,
+          background: '#041220', border: `1px solid ${BORDER2}`,
+          borderRadius: 8, padding: 12, minWidth: 320, maxWidth: 420,
+          boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
+          maxHeight: 320, overflowY: 'auto',
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <span style={{ fontFamily: MONO, fontSize: 10, color: ACCENT, letterSpacing: 1 }}>
+              UPLOADING {uploadQueue.filter(f => f.status === 'done').length}/{uploadQueue.length}
+            </span>
+            <button
+              onClick={() => setUploadQueue([])}
+              style={{ background: 'none', border: 'none', color: TEXTM, cursor: 'pointer', fontSize: 14 }}
+            >×</button>
+          </div>
+          {uploadQueue.map((item, i) => {
+            const statusColor = item.status === 'done' ? OK : item.status === 'failed' ? ERR : item.status === 'uploading' ? ACCENT : TEXTM
+            const statusIcon  = item.status === 'done' ? '✓' : item.status === 'failed' ? '✗' : item.status === 'uploading' ? '↑' : '○'
+            return (
+              <div key={i} style={{
+                display: 'flex', alignItems: 'center', gap: 8,
+                padding: '4px 0', borderBottom: `1px solid ${BORDER}`,
+              }}>
+                <span style={{ fontFamily: MONO, fontSize: 11, color: statusColor, flexShrink: 0 }}>{statusIcon}</span>
+                <span style={{ fontFamily: SANS, fontSize: 11, color: TEXT, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {item.name}
+                </span>
+                <span style={{ fontFamily: MONO, fontSize: 9, color: statusColor, flexShrink: 0 }}>
+                  {item.status === 'failed' ? (item.error ?? 'failed') : item.status.toUpperCase()}
+                </span>
+              </div>
+            )
+          })}
+          {uploadQueue.every(f => f.status === 'done' || f.status === 'failed') && (
+            <div style={{ marginTop: 8, fontFamily: MONO, fontSize: 9, color: TEXTM, textAlign: 'center' }}>
+              {uploadQueue.filter(f => f.status === 'done').length} done ·{' '}
+              {uploadQueue.filter(f => f.status === 'failed').length} failed
+            </div>
+          )}
+        </div>
+      )}
+
       <div style={{
         display: 'flex', flexDirection: 'column',
         height: '100vh', overflow: 'hidden',
         background: BG, color: TEXT, fontFamily: SANS,
+        ...(lightMode ? { filter: 'invert(1) hue-rotate(180deg)' } : {}),
       }}>
         <TopBar
           engineerName={engineerName}
@@ -2868,6 +3174,8 @@ export default function App() {
           totalIssues={totalIssues}
           totalErrors={totalErrors}
           onEditConfig={() => setShowConfig(prev => !prev)}
+          lightMode={lightMode}
+          onToggleLight={() => setLightMode(v => !v)}
         />
 
         {/* Three-panel body */}
@@ -2882,6 +3190,19 @@ export default function App() {
             onCopyTag={handleCopyTag}
             onAddDocs={handleAddDocs}
             onReindex={handleReindex}
+            width={leftW}
+          />
+
+          {/* Left drag handle */}
+          <div
+            onMouseDown={e => { dragRef.current = { side: 'left', startX: e.clientX, startW: leftW }; document.body.style.cursor = 'col-resize' }}
+            style={{
+              width: 4, flexShrink: 0, cursor: 'col-resize',
+              background: 'transparent', borderRight: `1px solid ${BORDER}`,
+              transition: 'border-color .15s', zIndex: 5,
+            }}
+            onMouseEnter={e => e.currentTarget.style.borderColor = ACCENT}
+            onMouseLeave={e => e.currentTarget.style.borderColor = BORDER}
           />
 
           <CentrePanel
@@ -2894,6 +3215,19 @@ export default function App() {
             onKeyDown={handleKeyDown}
             onAcceptDiff={handleAcceptDiff}
             onRejectDiff={handleRejectDiff}
+            onClearTag={() => setActiveTag(null)}
+          />
+
+          {/* Right drag handle */}
+          <div
+            onMouseDown={e => { dragRef.current = { side: 'right', startX: e.clientX, startW: rightW }; document.body.style.cursor = 'col-resize' }}
+            style={{
+              width: 4, flexShrink: 0, cursor: 'col-resize',
+              background: 'transparent', borderLeft: `1px solid ${BORDER}`,
+              transition: 'border-color .15s', zIndex: 5,
+            }}
+            onMouseEnter={e => e.currentTarget.style.borderColor = ACCENT}
+            onMouseLeave={e => e.currentTarget.style.borderColor = BORDER}
           />
 
           <RightPanel
@@ -2912,6 +3246,7 @@ export default function App() {
             onRenameDoc={handleRenameDoc}
             standards={standards}
             onStandardsRefresh={loadStandards}
+            width={rightW}
           />
         </div>
       </div>
