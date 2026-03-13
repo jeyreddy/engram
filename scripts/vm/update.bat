@@ -9,7 +9,7 @@ if %errorlevel% neq 0 (
   pause
   exit /b 1
 )
-pm2 reload engram-prod --update-env
+pm2 startOrRestart ecosystem.config.cjs --only engram-prod --update-env
 pm2 list
 echo === Production updated ===
 pause
